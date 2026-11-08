@@ -1,0 +1,56 @@
+# Use -p datapulse-monitor-test so test lifecycle never stops the development stack.
+services:
+  frontend-tests:
+    profiles: [test]
+    build:
+      context: ./frontend
+      target: test
+    environment:
+      API_BASE_URL: http://api.test
+      PUBLIC_API_URL: http://localhost:8010
+  db-test:
+    image: mariadb:11.7.2
+    profiles: [test]
+    environment:
+      MARIADB_DATABASE: datapulse_test
+      MARIADB_USER: datapulse_test
+      MARIADB_PASSWORD: datapulse-test-only
+      MARIADB_ROOT_PASSWORD: datapulse-test-root-only
+      TZ: UTC
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  migrate-test:
+    profiles: [test]
+    build:
+      context: ./backend
+      target: runtime
+    environment:
+      DATABASE_URL: mysql+asyncmy://datapulse_test:datapulse-test-only@db-test:3306/datapulse_test
+      JWT_SECRET: test-only-jwt-secret-at-least-thirty-two-characters
+    command: ["sh", "-c", "alembic upgrade head && alembic check"]
+    depends_on:
+      db-test:
+        condition: service_healthy
+
+  tests:
+    profiles: [test]
+    build:
+      context: ./backend
+      target: test
+    environment:
+      TEST_DATABASE_URL: mysql+asyncmy://datapulse_test:datapulse-test-only@db-test:3306/datapulse_test
+      JWT_SECRET: test-only-jwt-secret-at-least-thirty-two-characters
+      SIMULATOR_ENABLED: "false"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: ["sh", "-c", "ruff check --no-cache app tests migrations scripts && pytest -q tests scripts/tests"]
+    depends_on:
+      migrate-test:
+        condition: service_completed_successfully

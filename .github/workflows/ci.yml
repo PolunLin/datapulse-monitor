@@ -1,0 +1,168 @@
+name: DataPulse integration
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fresh startup and restart after bootstrap demotion
+        shell: bash
+        run: |
+          mkdir -p artifacts/clean-deployment
+          python3 scripts/clean_environment_smoke.py \
+            --project datapulse-clean-${{ github.run_id }}-${{ github.run_attempt }} \
+            --backend-port 18010 --frontend-port 18510 \
+            --diagnostics-dir artifacts/clean-deployment \
+            2>&1 | tee artifacts/clean-deployment/smoke.log
+      - name: Save startup results and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-deployment-results-${{ github.run_attempt }}
+          path: artifacts/clean-deployment/
+          if-no-files-found: error
+          retention-days: 14
+
+  mariadb-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: datapulse-backend-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_CONTAINER: datapulse-backend-tests-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create isolated development configuration
+        run: python3 scripts/init_env.py
+      - name: Test against migrated MariaDB 11.7
+        id: backend-tests
+        shell: bash
+        run: |
+          mkdir -p artifacts/backend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test run \
+            --build --name "$TEST_CONTAINER" \
+            -e PYTEST_ADDOPTS="-p no:cacheprovider --junitxml=/tmp/test-results/junit.xml" \
+            tests 2>&1 | tee artifacts/backend/test.log
+      - name: Copy backend test report
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.backend-tests.outcome }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/backend
+          if docker container inspect "$TEST_CONTAINER" >/dev/null 2>&1; then
+            docker cp "$TEST_CONTAINER:/tmp/test-results/." artifacts/backend/ \
+              2>artifacts/backend/report-copy.log || true
+          fi
+          if [ "$TEST_OUTCOME" = success ]; then
+            test -s artifacts/backend/junit.xml
+          fi
+      - name: Show service diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p artifacts/backend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test ps --all \
+            >artifacts/backend/service-status.log 2>&1 || true
+          docker compose -f compose.yaml -f compose.test.yaml --profile test logs --no-color --tail=200 \
+            >artifacts/backend/services.log 2>&1 || true
+      - name: Remove isolated CI containers and volumes
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/backend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test down --volumes --remove-orphans \
+            2>&1 | tee artifacts/backend/cleanup.log
+      - name: Save backend report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results-${{ github.run_attempt }}
+          path: artifacts/backend/
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: datapulse-frontend-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_CONTAINER: datapulse-frontend-tests-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create isolated development configuration
+        run: python3 scripts/init_env.py
+      - name: Test Streamlit views and frontend clients
+        id: frontend-tests
+        shell: bash
+        run: |
+          mkdir -p artifacts/frontend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test run \
+            --build --no-deps --name "$TEST_CONTAINER" \
+            -e PYTEST_ADDOPTS="-p no:cacheprovider --junitxml=/tmp/test-results/junit.xml" \
+            frontend-tests 2>&1 | tee artifacts/frontend/test.log
+      - name: Copy frontend test report
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.frontend-tests.outcome }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/frontend
+          if docker container inspect "$TEST_CONTAINER" >/dev/null 2>&1; then
+            docker cp "$TEST_CONTAINER:/tmp/test-results/." artifacts/frontend/ \
+              2>artifacts/frontend/report-copy.log || true
+          fi
+          if [ "$TEST_OUTCOME" = success ]; then
+            test -s artifacts/frontend/junit.xml
+          fi
+      - name: Save frontend container diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p artifacts/frontend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test ps --all \
+            >artifacts/frontend/service-status.log 2>&1 || true
+          docker logs "$TEST_CONTAINER" >artifacts/frontend/container.log 2>&1 || true
+      - name: Remove isolated CI containers and volumes
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/frontend
+          docker compose -f compose.yaml -f compose.test.yaml --profile test down --volumes --remove-orphans \
+            2>&1 | tee artifacts/frontend/cleanup.log
+      - name: Save frontend report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-results-${{ github.run_attempt }}
+          path: artifacts/frontend/
+          if-no-files-found: error
+          retention-days: 14
+
+  ci-required:
+    name: DataPulse CI required
+    if: always()
+    needs: [clean-deployment, mariadb-integration, frontend-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          CLEAN_RESULT: ${{ needs.clean-deployment.result }}
+          BACKEND_RESULT: ${{ needs.mariadb-integration.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-tests.result }}
+        run: |
+          printf 'Clean deployment: %s\nBackend: %s\nFrontend: %s\n' \
+            "$CLEAN_RESULT" "$BACKEND_RESULT" "$FRONTEND_RESULT"
+          test "$CLEAN_RESULT" = success
+          test "$BACKEND_RESULT" = success
+          test "$FRONTEND_RESULT" = success

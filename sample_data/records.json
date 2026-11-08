@@ -1,0 +1,14 @@
+[
+  {
+    "title": "設備 A 溫度",
+    "value": "26.500000",
+    "category": "device-001",
+    "timestamp": "2026-11-08T10:00:00+08:00"
+  },
+  {
+    "title": "設備 B 溫度",
+    "value": "27.125000",
+    "category": "device-002",
+    "timestamp": "2026-11-08T10:00:01+08:00"
+  }
+]
