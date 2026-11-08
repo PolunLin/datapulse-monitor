@@ -20,6 +20,8 @@ python3 scripts/clean_environment_smoke.py --project datapulse-clean-demo --back
 
 此流程會建立並清除獨立測試專案，涵蓋首次啟動、三角色、CRUD、Swagger、WebSocket 入庫，以及初始化管理員降權後保留 volume 重建服務；不要在目前使用中的開發目錄執行。一般單元與整合測試指令見 README。
 
+2026-11-08 已從提交 `db497be` 的乾淨 clone 成功執行此流程，使用隔離專案與 18010／18510 埠。兩次完整啟動、降權保留、資料保存與新事件入庫全部通過；結束後測試容器、volume 及 `.env` 均已清除。另有 397 項後端／指令測試與 248 項前端測試通過。
+
 ## 啟動與認證
 
 1. 開啟 Streamlit，以已註冊帳號登入，確認進入即時監控頁面。
