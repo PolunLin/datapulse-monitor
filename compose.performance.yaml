@@ -1,0 +1,76 @@
+# Disposable performance stack. Never merge with compose.yaml or use development volumes.
+# scripts/run_performance.py supplies private, per-run credentials and a unique project.
+x-api-environment: &api-environment
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: datapulse_performance_test
+  DB_USER: datapulse_performance
+  DB_PASSWORD: ${PERF_DB_PASSWORD:?Use scripts/run_performance.py}
+  JWT_SECRET: ${PERF_JWT_SECRET:?Use scripts/run_performance.py}
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  SIMULATOR_ENABLED: "true"
+  SIMULATOR_INTERVAL_SECONDS: "1"
+  WS_MAX_CONNECTIONS: "0"
+  LOG_LEVEL: WARNING
+
+services:
+  db:
+    image: mariadb:11.7.2
+    environment:
+      MARIADB_DATABASE: datapulse_performance_test
+      MARIADB_USER: datapulse_performance
+      MARIADB_PASSWORD: ${PERF_DB_PASSWORD:?Use scripts/run_performance.py}
+      MARIADB_ROOT_PASSWORD: ${PERF_DB_ROOT_PASSWORD:?Use scripts/run_performance.py}
+      TZ: UTC
+    volumes:
+      - performance_data:/var/lib/mysql
+    cpus: 2.0
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    image: ${PERF_IMAGE:?Use scripts/run_performance.py}
+    build:
+      context: ./backend
+      target: runtime
+    environment:
+      <<: *api-environment
+      BOOTSTRAP_ADMIN_EMAIL: performance@example.com
+      BOOTSTRAP_ADMIN_PASSWORD: ${PERF_ADMIN_PASSWORD:?Use scripts/run_performance.py}
+    command: ["sh", "-c", "alembic upgrade head && python -m app.cli.seed"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: ${PERF_IMAGE:?Use scripts/run_performance.py}
+    environment: *api-environment
+    ports:
+      - "127.0.0.1:${PERF_BACKEND_PORT:-19110}:8000"
+    cpus: 2.0
+    mem_limit: 2g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  performance_data:

@@ -241,6 +241,33 @@ async def test_connection_limit_and_shutdown_are_bounded():
     assert manager.connection_count == 0
 
 
+async def test_zero_connection_limit_accepts_more_than_default_and_broadcasts():
+    manager = ConnectionManager(FakeAuth(), max_connections=0)
+    sockets = [FakeSocket() for _ in range(128)]
+    tasks = []
+    try:
+        for websocket in sockets:
+            tasks.append(await connect(manager, websocket))
+        assert manager.connection_count == len(sockets)
+        assert all(websocket.accepted for websocket in sockets)
+        sample = event()
+        await manager.publish(sample)
+        messages = await asyncio.wait_for(
+            asyncio.gather(*(websocket.outgoing.get() for websocket in sockets)), timeout=2
+        )
+        assert all(message["event_id"] == str(sample.event_id) for message in messages)
+    finally:
+        await manager.close_all()
+        await asyncio.gather(*tasks)
+    assert manager.connection_count == 0
+    assert all(websocket.close_code == 1001 for websocket in sockets)
+
+
+def test_negative_connection_limit_is_rejected():
+    with pytest.raises(ValueError, match="non-negative"):
+        ConnectionManager(FakeAuth(), max_connections=-1)
+
+
 async def test_initially_disabled_rejects_connections_and_can_be_enabled():
     manager = ConnectionManager(FakeAuth(), enabled=False)
     rejected = FakeSocket()

@@ -11,7 +11,21 @@ from state.admin import retain_authorized_state
 
 
 def get_api_client() -> APIClient:
-    return APIClient(load_config().api_base_url, token=st.session_state.get("auth_token"))
+    scope = (load_config().api_base_url, st.session_state.get("auth_token"))
+    client = st.session_state.get("api_client")
+    if client is None or st.session_state.get("api_client_scope") != scope:
+        close_api_client()
+        client = APIClient(scope[0], token=scope[1])
+        st.session_state["api_client"] = client
+        st.session_state["api_client_scope"] = scope
+    return client
+
+
+def close_api_client() -> None:
+    client = st.session_state.pop("api_client", None)
+    st.session_state.pop("api_client_scope", None)
+    if client is not None:
+        client.close()
 
 
 def get_user() -> dict:
@@ -30,9 +44,12 @@ def clear_session(message: str | None = None) -> None:
     try:
         stop_receiver()
     finally:
-        st.session_state.clear()
-        if message:
-            st.session_state["auth_notice"] = message
+        try:
+            close_api_client()
+        finally:
+            st.session_state.clear()
+            if message:
+                st.session_state["auth_notice"] = message
 
 
 def establish_session(token: dict, user: dict) -> None:

@@ -17,6 +17,7 @@ class RealtimeSample(Base):
         Index("ix_realtime_samples_timestamp_id", "timestamp", "id"),
         Index("ix_realtime_samples_category_timestamp_id", "category", "timestamp", "id"),
         Index("ix_realtime_samples_device_timestamp_id", "device_id", "timestamp", "id"),
+        Index("ix_realtime_samples_device_id", "device_id", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

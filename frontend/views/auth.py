@@ -1,5 +1,7 @@
 """Login and registration through FastAPI; tokens stay in the server-side session."""
 
+from contextlib import closing
+
 import streamlit as st
 
 from clients.api import APIClient, APIError
@@ -8,13 +10,25 @@ from state import session
 
 
 def render() -> None:
-    st.title("DataPulse")
-    st.write("登入後即可管理資料、查看即時圖表與異常告警。")
-    message = st.session_state.pop("auth_notice", None)
-    if message:
-        st.info(message)
-    left, _ = st.columns([1, 1])
-    with left:
+    st.html("""
+    <style>
+      .stMainBlockContainer:has(.st-key-auth_panel) {
+        padding: 4rem 1.5rem;
+      }
+      .st-key-auth_screen {
+        min-height: calc(100dvh - 8rem);
+      }
+    </style>
+    """)
+    with (
+        st.container(key="auth_screen", horizontal_alignment="center", vertical_alignment="center"),
+        st.container(key="auth_panel", width=480),
+    ):
+        st.title("DataPulse")
+        st.write("登入後即可管理資料、查看即時圖表與異常告警。")
+        message = st.session_state.pop("auth_notice", None)
+        if message:
+            st.info(message)
         login_tab, register_tab = st.tabs(["登入", "註冊"])
         with login_tab, st.form("login_form", clear_on_submit=True):
             email = st.text_input("Email", key="login_email", max_chars=320)
@@ -25,9 +39,11 @@ def render() -> None:
                 st.error("請輸入 Email 與密碼。")
             else:
                 try:
-                    client = APIClient(load_config().api_base_url)
-                    token = client.login(email.strip(), password)
-                    user = APIClient(load_config().api_base_url, token=token["access_token"]).me()
+                    base_url = load_config().api_base_url
+                    with closing(APIClient(base_url)) as client:
+                        token = client.login(email.strip(), password)
+                    with closing(APIClient(base_url, token=token["access_token"])) as client:
+                        user = client.me()
                     session.establish_session(token, user)
                     st.rerun()
                 except APIError as exc:
@@ -46,9 +62,8 @@ def render() -> None:
                 st.error("兩次輸入的密碼不一致。")
             else:
                 try:
-                    APIClient(load_config().api_base_url).register(
-                        register_email.strip(), register_password
-                    )
+                    with closing(APIClient(load_config().api_base_url)) as client:
+                        client.register(register_email.strip(), register_password)
                     st.success("帳號已建立，請切換至登入頁籤。")
                 except APIError as exc:
                     st.error(exc.message)

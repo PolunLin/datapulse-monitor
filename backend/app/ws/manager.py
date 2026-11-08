@@ -56,8 +56,10 @@ class ConnectionManager:
         max_connections: int = 100,
         enabled: bool = True,
     ) -> None:
-        if min(queue_capacity, send_timeout, auth_check_interval, max_connections) <= 0:
+        if min(queue_capacity, send_timeout, auth_check_interval) <= 0:
             raise ValueError("WebSocket limits must be positive")
+        if max_connections < 0:
+            raise ValueError("WebSocket connection limit must be non-negative")
         self.auth_service = auth_service
         self.queue_capacity = queue_capacity
         self.send_timeout = send_timeout
@@ -88,7 +90,7 @@ class ConnectionManager:
         if not self.enabled:
             await self.reject_unavailable(websocket)
             return
-        if len(self._connections) >= self.max_connections:
+        if self.max_connections > 0 and len(self._connections) >= self.max_connections:
             await self._safe_close(websocket, 1013, "Stream capacity reached")
             return
 

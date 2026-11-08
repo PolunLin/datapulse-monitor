@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     ws_queue_capacity: int = Field(default=100, ge=1, le=10000)
     ws_send_timeout_seconds: float = Field(default=2.0, gt=0, le=10, allow_inf_nan=False)
     ws_auth_check_interval_seconds: float = Field(default=1.0, gt=0, le=30, allow_inf_nan=False)
-    ws_max_connections: int = Field(default=100, ge=1, le=10000)
+    # Zero removes the application connection cap; per-client safety limits still apply.
+    ws_max_connections: int = Field(default=100, ge=0, le=10000)
 
     @model_validator(mode="after")
     def validate_configuration(self) -> "Settings":

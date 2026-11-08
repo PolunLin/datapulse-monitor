@@ -38,3 +38,4 @@ class DeviceRead(BaseModel):
 
 class DeviceCatalog(BaseModel):
     items: list[DeviceRead]
+    sample_interval_seconds: float = Field(gt=0, allow_inf_nan=False)

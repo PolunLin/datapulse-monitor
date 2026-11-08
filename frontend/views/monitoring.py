@@ -1,5 +1,6 @@
 """Device-scoped live reconciliation with a shared analysis/history entry point."""
 
+import math
 import time
 from datetime import UTC, datetime
 
@@ -14,14 +15,20 @@ from state.monitor import MonitorBuffer
 from utils.timezone import can_display_taipei, format_taipei
 
 SYNC_SECONDS = 5
+STALE_SECONDS = 10
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def reset_stream() -> None:
     session.stop_receiver()
     st.session_state["monitor_buffer"] = MonitorBuffer()
     st.session_state["monitor_sync_due"] = True
-    for key in ("sync_error", "synced_at", "stored_total", "sync_attempt", "reconnect_count"):
+    for key in ("sync_error", "synced_at", "cursor", "sync_attempt", "reconnect_count"):
         st.session_state.pop(f"monitor_{key}", None)
+    st.session_state["monitor_waiting_since"] = time.monotonic()
 
 
 def change_device() -> None:
@@ -36,16 +43,23 @@ def toggle_pause() -> None:
         reset_stream()
 
 
-def _stored_events(result: dict, device_id: str) -> list[SampleEvent]:
+def _stored_events(result: dict, device_id: str, after_id: int | None) -> list[SampleEvent]:
     rows = result["items"]
     if not isinstance(rows, list) or len(rows) > 300:
         raise ValueError("Invalid sample page")
     events = [parse_stored_sample(row) for row in rows]
     if any(event.device_id != device_id for event in events):
         raise ValueError("Unexpected device")
-    total = result["total"]
-    if type(total) is not int or total < len(rows):
-        raise ValueError("Invalid sample total")
+    cursor, has_more = result["next_cursor"], result["has_more"]
+    if type(cursor) is not int or cursor < 0 or type(has_more) is not bool:
+        raise ValueError("Invalid sample cursor")
+    ids = [row["id"] for row in rows]
+    if ids != sorted(set(ids)) or (after_id is not None and any(i <= after_id for i in ids)):
+        raise ValueError("Invalid sample order")
+    if cursor != (ids[-1] if ids else after_id or 0) or (has_more and not rows):
+        raise ValueError("Invalid sample progress")
+    if after_id is None and has_more:
+        raise ValueError("Invalid initial snapshot")
     return events
 
 
@@ -58,11 +72,12 @@ def _synchronize(buffer: MonitorBuffer, device_id: str) -> None:
         return
     st.session_state["monitor_sync_attempt"] = now
     st.session_state["monitor_sync_due"] = False
+    after_id = st.session_state.get("monitor_cursor")
     try:
-        result = session.get_api_client().monitoring_samples(
-            device_id=device_id, page=1, page_size=300
+        result = session.get_api_client().monitoring_sample_feed(
+            device_id=device_id, after_id=after_id, limit=300
         )
-        events = _stored_events(result, device_id)
+        events = _stored_events(result, device_id, after_id)
     except APIError as exc:
         if exc.is_unauthorized:
             session.expire_session()
@@ -76,11 +91,33 @@ def _synchronize(buffer: MonitorBuffer, device_id: str) -> None:
         )
         return
     buffer.append(events)
-    st.session_state["monitor_stored_total"] = result["total"]
-    st.session_state["monitor_synced_at"] = (
-        format_taipei(datetime.now(UTC), "%H:%M:%S") + " 台灣時間"
-    )
+    # Only committed REST rows advance the cursor; WS timestamps can precede
+    # a delayed database commit and must never move this checkpoint forward.
+    st.session_state["monitor_cursor"] = result["next_cursor"]
+    st.session_state["monitor_sync_due"] = result["has_more"]
+    st.session_state["monitor_synced_at"] = format_taipei(_utc_now(), "%H:%M:%S") + " 台灣時間"
     st.session_state.pop("monitor_sync_error", None)
+
+
+def _display_freshness(events: list[SampleEvent]) -> bool:
+    """Report measurement age independently of socket and history-request health."""
+    threshold = st.session_state.get("monitor_stale_seconds", STALE_SECONDS)
+    if events:
+        latest = max(event.timestamp for event in events)
+        age = max(0.0, (_utc_now() - latest).total_seconds())
+        st.caption(f"最新資料距今 {int(age)} 秒 · 超過 {threshold:g} 秒未更新即告警")
+        if age >= threshold:
+            st.warning(
+                f"資料停止更新：已 {int(age)} 秒未收到較新的設備資料，請確認設備與資料來源。"
+            )
+            return False
+        return True
+    waiting_since = st.session_state.setdefault("monitor_waiting_since", time.monotonic())
+    waiting = max(0.0, time.monotonic() - waiting_since)
+    st.caption(f"等待第一筆設備資料 · 已等待 {int(waiting)} 秒")
+    if waiting >= threshold:
+        st.warning(f"資料停止更新：等待超過 {threshold:g} 秒仍沒有設備資料，請確認設備與資料來源。")
+    return False
 
 
 def _live_charts(events: list[SampleEvent]) -> None:
@@ -154,7 +191,7 @@ def live_panel() -> None:
             return
         st.info("畫面更新已暫停；設備仍持續產生與保存資料。繼續後會重新載入最近資料。")
     else:
-        # Subscribe before the snapshot; repeating REST reads also covers delayed commits.
+        # Subscribe before the snapshot, then reconcile only newly committed rows.
         receiver = session.get_receiver(device_id=device_id)
         snapshot = receiver.snapshot()
         if snapshot.status == "auth_failed":
@@ -170,10 +207,16 @@ def live_panel() -> None:
         sync_error = st.session_state.get("monitor_sync_error")
         if sync_error:
             st.warning(sync_error)
+        fresh = _display_freshness(buffer.recent(300)) if device_id != "legacy" else False
         if snapshot.status == "connected":
-            st.caption(
-                "即時連線已連接，歷史同步尚未恢復。" if sync_error else "🟢 已連線 · 每秒更新"
-            )
+            if sync_error:
+                st.caption("即時連線已連接，歷史同步尚未恢復。")
+            elif device_id == "legacy":
+                st.caption("歷史資料檢視 · 不等待新的設備資料")
+            elif fresh:
+                st.caption("🟢 已連線 · 設備資料持續更新")
+            else:
+                st.caption("即時連線已連接 · 請留意資料更新狀態")
         elif snapshot.status in {"connecting", "reconnecting"}:
             st.info(snapshot.message)
         else:
@@ -191,12 +234,10 @@ def live_panel() -> None:
         if snapshot.invalid_count:
             st.warning(f"已略過 {snapshot.invalid_count} 筆格式不符的事件。")
     if synced := st.session_state.get("monitor_synced_at"):
-        st.caption(
-            f"歷史同步於 {synced} · 此設備已落庫 {st.session_state['monitor_stored_total']} 筆"
-        )
+        st.caption(f"歷史同步於 {synced}")
     _live_charts(buffer.recent(st.session_state.get("monitor_limit", 120)))
     st.caption(
-        "畫面保留最近最多 300 筆，每 5 秒同步已落庫歷史；即時事件可能仍待批次寫入。"
+        "畫面保留最近最多 300 筆，每 5 秒增量同步已落庫資料；即時事件可能仍待批次寫入。"
         "告警表顯示其中最近 20 筆異常。更早資料請至「資料分析」查詢。"
     )
 
@@ -209,11 +250,14 @@ def render() -> None:
         st.session_state["monitor_paused"] = False
         st.session_state["monitor_view_open"] = True
     try:
-        devices = {
-            item["id"]: item for item in session.get_api_client().monitoring_devices()["items"]
-        }
+        catalog = session.get_api_client().monitoring_devices()
+        devices = {item["id"]: item for item in catalog["items"]}
         if not devices:
             raise ValueError("No devices")
+        interval = catalog.get("sample_interval_seconds", 1)
+        if type(interval) not in {int, float} or not math.isfinite(interval) or interval <= 0:
+            raise ValueError("Invalid sample interval")
+        st.session_state["monitor_stale_seconds"] = max(STALE_SECONDS, interval * 3)
     except APIError as exc:
         session.stop_receiver()
         session.handle_api_error(exc)

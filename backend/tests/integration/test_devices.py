@@ -44,6 +44,9 @@ async def test_device_catalog_and_samples_are_available_to_all_roles(
     await persist(app, event)
     response = await client.get("/api/v1/monitoring/devices", headers=account.headers)
     assert response.status_code == 200, response.text
+    assert (
+        response.json()["sample_interval_seconds"] == app.state.settings.simulator_interval_seconds
+    )
     devices = {item["id"]: item for item in response.json()["items"]}
     assert set(devices) == {*DEVICE_NAMES, "legacy"}
     for device_id, name in DEVICE_NAMES.items():

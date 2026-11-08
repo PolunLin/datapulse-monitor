@@ -1,6 +1,12 @@
 from app.db.session import SessionFactory
 from app.repositories import realtime
-from app.schemas.monitoring import SampleFilters, SamplePage, SampleRead
+from app.schemas.monitoring import (
+    SampleFeed,
+    SampleFeedFilters,
+    SampleFilters,
+    SamplePage,
+    SampleRead,
+)
 from app.services.auth import Principal
 from app.services.authorization import require_admin, require_sample_reader
 
@@ -16,6 +22,21 @@ class MonitoringHistoryService:
     async def list_monitoring(self, principal: Principal, filters: SampleFilters) -> SamplePage:
         require_sample_reader(principal)
         return await self._list_samples(filters)
+
+    async def feed(self, principal: Principal, filters: SampleFeedFilters) -> SampleFeed:
+        require_sample_reader(principal)
+        async with self.session_factory.begin() as session:
+            samples, next_cursor, has_more = await realtime.list_sample_feed(
+                session,
+                device_id=filters.device_id,
+                after_id=filters.after_id,
+                limit=filters.limit,
+            )
+            return SampleFeed(
+                items=[SampleRead.model_validate(sample) for sample in samples],
+                next_cursor=next_cursor,
+                has_more=has_more,
+            )
 
     async def _list_samples(self, filters: SampleFilters) -> SamplePage:
         async with self.session_factory.begin() as session:

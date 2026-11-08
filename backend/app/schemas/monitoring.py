@@ -49,6 +49,20 @@ class MonitoringSampleFilters(SampleFilters):
     page_size: int = Field(default=300, ge=1, le=300)
 
 
+class SampleFeedFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    device_id: DeviceId
+    after_id: int | None = Field(default=None, ge=0)
+    limit: int = Field(default=300, ge=1, le=300)
+
+
+class SampleFeed(BaseModel):
+    items: list[SampleRead]
+    next_cursor: int = Field(ge=0)
+    has_more: bool
+
+
 class SamplePage(BaseModel):
     items: list[SampleRead]
     total: int

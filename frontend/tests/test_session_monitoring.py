@@ -17,7 +17,7 @@ from components.charts import bar_chart, event_frame, trend_chart
 from config import FrontendConfig
 from state import session
 from state.monitor import MonitorBuffer
-from views import analysis, auth
+from views import analysis, auth, monitoring
 
 
 def event(value="85", identifier=None, device_id="device-001"):
@@ -111,37 +111,32 @@ class FakeAPI:
             ]
         }
 
-    def monitoring_samples(self, **filters):
+    def monitoring_sample_feed(self, **filters):
         self.sample_calls.append(filters)
         if self.on_samples:
             self.on_samples()
         if self.sample_error:
             raise self.sample_error
-        rows = [row for row in self.samples if row["device_id"] == filters["device_id"]]
-        if "start_time" in filters:
-            rows = [
-                row
-                for row in rows
-                if datetime.fromisoformat(row["timestamp"])
-                >= datetime.fromisoformat(filters["start_time"])
-            ]
-        if "end_time" in filters:
-            rows = [
-                row
-                for row in rows
-                if datetime.fromisoformat(row["timestamp"])
-                < datetime.fromisoformat(filters["end_time"])
-            ]
-        if "is_anomaly" in filters:
-            rows = [row for row in rows if row["is_anomaly"] == filters["is_anomaly"]]
-        rows.sort(key=lambda row: (row["timestamp"], row["id"]), reverse=True)
-        page, size = filters["page"], filters["page_size"]
+        rows = sorted(
+            [row for row in self.samples if row["device_id"] == filters["device_id"]],
+            key=lambda row: row["id"],
+        )
+        after_id, limit = filters.get("after_id"), filters["limit"]
+        if after_id is None:
+            rows = rows[-limit:]
+            has_more = False
+        else:
+            rows = [row for row in rows if row["id"] > after_id]
+            has_more = len(rows) > limit
+            rows = rows[:limit]
         return {
-            "items": rows[(page - 1) * size : page * size],
-            "total": len(rows),
-            "page": page,
-            "page_size": size,
+            "items": rows,
+            "next_cursor": rows[-1]["id"] if rows else after_id or 0,
+            "has_more": has_more,
         }
+
+    def close(self):
+        pass
 
     def login(self, email, password):
         self.login_calls.append((email, password))
@@ -168,6 +163,7 @@ class FakeAPI:
 def setup_app(monkeypatch):
     api = FakeAPI()
     receivers = []
+    monkeypatch.setattr(monitoring, "_utc_now", lambda: datetime(2026, 11, 8, 4, 0, 2, tzinfo=UTC))
 
     def make_receiver(*args, **kwargs):
         receiver = FakeReceiver(*args, **kwargs)
@@ -436,7 +432,7 @@ def test_initial_history_subscribes_first_and_merges_without_duplicates(setup_ap
     ]
     assert [item.persistence for item in events] == ["committed", "committed", "pending"]
     assert [metric.value for metric in app.metric][2] == "3"
-    assert api.sample_calls == [{"device_id": "device-001", "page": 1, "page_size": 300}]
+    assert api.sample_calls == [{"device_id": "device-001", "after_id": None, "limit": 300}]
 
 
 def test_periodic_sync_recovers_delayed_commits_and_reconnection_gap(setup_app):
@@ -450,6 +446,8 @@ def test_periodic_sync_recovers_delayed_commits_and_reconnection_gap(setup_app):
     app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
     app.run()
     assert len(api.sample_calls) == 2
+    assert api.sample_calls[-1]["after_id"] == 0
+    assert app.session_state["monitor_cursor"] == 3
     events = app.session_state["monitor_buffer"].recent()
     assert [item.event_id for item in events] == [
         missing.event_id,
@@ -462,6 +460,7 @@ def test_periodic_sync_recovers_delayed_commits_and_reconnection_gap(setup_app):
     receivers[0].reconnect_count = 1
     app.run()
     assert len(api.sample_calls) == 3
+    assert api.sample_calls[-1]["after_id"] == 3
     assert app.session_state["monitor_buffer"].recent()[-1].event_id == after_reconnect.event_id
 
 
@@ -586,9 +585,10 @@ def test_monitor_live_labels_use_taiwan_time(setup_app):
 
 def test_rest_snapshot_rejects_wrong_device_without_polluting_live_buffer(setup_app):
     app, api, _ = setup_app
-    api.monitoring_samples = lambda **_filters: {
+    api.monitoring_sample_feed = lambda **_filters: {
         "items": [stored(event(device_id="device-003"))],
-        "total": 1,
+        "next_cursor": 1,
+        "has_more": False,
     }
     login(app)
     assert any("格式不正確" in item.value for item in app.warning)
@@ -612,3 +612,183 @@ def test_returning_to_monitor_reloads_history_and_navigation_rejects_old_live_ti
     assert not fragment.exception and not fragment.metric
     assert "realtime_receiver" not in fragment.session_state
     assert len(receivers) == 2
+
+
+def test_incremental_cursor_uses_commits_instead_of_newer_pending_event_time(setup_app):
+    app, api, _ = setup_app
+    initial = replace(event("20"), timestamp=datetime(2026, 11, 8, 3, 59, 59, tzinfo=UTC))
+    api.samples = [stored(initial, 5)]
+    login(app)
+    assert app.session_state["monitor_cursor"] == 5
+    pending = app.session_state["monitor_buffer"].recent()[-1]
+    delayed = replace(event("21"), timestamp=initial.timestamp - timedelta(minutes=2))
+    api.samples.extend([stored(delayed, 6), stored(pending, 7)])
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert api.sample_calls[-1] == {"device_id": "device-001", "after_id": 5, "limit": 300}
+    assert app.session_state["monitor_cursor"] == 7
+    events = {sample.event_id: sample for sample in app.session_state["monitor_buffer"].recent()}
+    assert events[delayed.event_id].persistence == "committed"
+    assert events[pending.event_id].persistence == "committed"
+
+
+def test_failed_incremental_request_retains_cursor_and_retries_same_position(setup_app):
+    app, api, _ = setup_app
+    api.samples = [stored(event("20"), 5)]
+    login(app)
+    later = event("21")
+    api.samples.append(stored(later, 6))
+    api.sample_error = APIError(503, "歷史暫時無法讀取")
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert app.session_state["monitor_cursor"] == 5
+    assert later.event_id not in {
+        sample.event_id for sample in app.session_state["monitor_buffer"].recent()
+    }
+    api.sample_error = None
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert api.sample_calls[-1]["after_id"] == 5
+    assert app.session_state["monitor_cursor"] == 6
+    assert "monitor_sync_error" not in app.session_state
+
+
+def test_empty_incremental_page_keeps_checkpoint_and_device_change_bootstraps(setup_app):
+    app, api, _ = setup_app
+    api.samples = [stored(event("20"), 5)]
+    login(app)
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert app.session_state["monitor_cursor"] == 5
+    assert api.sample_calls[-1]["after_id"] == 5
+    assert app.session_state["monitor_sync_due"] is False
+    app.selectbox(key="monitor_device").select("device-002").run()
+    assert api.sample_calls[-1] == {"device_id": "device-002", "after_id": None, "limit": 300}
+    assert app.session_state["monitor_cursor"] == 0
+
+
+def test_incremental_backlog_continues_next_tick_without_five_second_wait(setup_app):
+    app, api, _ = setup_app
+    api.samples = [stored(event("20"), 5)]
+    login(app)
+    api.samples.extend(stored(event("21"), index) for index in range(6, 307))
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert app.session_state["monitor_cursor"] == 305
+    assert app.session_state["monitor_sync_due"] is True
+    before = len(api.sample_calls)
+    app.run()
+    assert len(api.sample_calls) == before + 1
+    assert api.sample_calls[-1]["after_id"] == 305
+    assert app.session_state["monitor_cursor"] == 306
+    assert app.session_state["monitor_sync_due"] is False
+    assert len(app.session_state["monitor_buffer"].recent(300)) == 300
+
+
+@pytest.mark.parametrize(
+    "items,cursor,has_more,after_id",
+    [
+        ([2, 1], 1, False, 0),
+        ([1, 1], 1, False, 0),
+        ([2], 3, False, 1),
+        ([1], 1, False, 1),
+        ([], 0, False, 2),
+        ([], 2, True, 2),
+        ([1], True, False, 0),
+        ([1], 1, "false", 0),
+        ([1], 1, True, None),
+    ],
+)
+def test_incremental_page_rejects_invalid_checkpoints(items, cursor, has_more, after_id):
+    payload = {
+        "items": [stored(event(), identifier) for identifier in items],
+        "next_cursor": cursor,
+        "has_more": has_more,
+    }
+    with pytest.raises(ValueError):
+        monitoring._stored_events(payload, "device-001", after_id)
+
+
+def test_invalid_incremental_response_does_not_advance_or_pollute_state(setup_app):
+    app, api, _ = setup_app
+    api.samples = [stored(event("20"), 5)]
+    login(app)
+    later = event("21")
+    api.monitoring_sample_feed = lambda **_filters: {
+        "items": [stored(later, 6)],
+        "next_cursor": 999,
+        "has_more": False,
+    }
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert app.session_state["monitor_cursor"] == 5
+    assert later.event_id not in {
+        sample.event_id for sample in app.session_state["monitor_buffer"].recent()
+    }
+    assert any("格式不正確" in item.value for item in app.warning)
+
+
+def test_measurement_stall_is_independent_of_connected_socket_and_successful_sync(
+    setup_app, monkeypatch
+):
+    app, api, receivers = setup_app
+    login(app)
+    assert any("🟢" in item.value for item in app.caption)
+    now = datetime(2026, 11, 8, 4, 0, 12, tzinfo=UTC)
+    monkeypatch.setattr(monitoring, "_utc_now", lambda: now)
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert receivers[0].status == "connected"
+    assert "monitor_sync_error" not in app.session_state
+    assert any("資料停止更新" in item.value for item in app.warning)
+    assert any("最新資料距今 11 秒" in item.value for item in app.caption)
+    assert not any("🟢" in item.value for item in app.caption)
+    receivers[0].events = [replace(event("22"), timestamp=now)]
+    app.run()
+    assert not any("資料停止更新" in item.value for item in app.warning)
+    assert any("🟢" in item.value for item in app.caption)
+
+
+def test_empty_feed_has_initial_grace_period_then_warns(setup_app, monkeypatch):
+    app, _, _ = setup_app
+    monkeypatch.setattr(FakeReceiver, "drain", lambda self: [])
+    login(app)
+    assert not any("資料停止更新" in item.value for item in app.warning)
+    assert not any("🟢" in item.value for item in app.caption)
+    app.session_state["monitor_waiting_since"] = time.monotonic() - 11
+    app.session_state["monitor_sync_attempt"] = time.monotonic() - 6
+    app.run()
+    assert any("等待超過 10 秒" in item.value for item in app.warning)
+
+
+def test_pause_and_legacy_history_do_not_raise_measurement_stall_alarm(setup_app, monkeypatch):
+    app, _, _ = setup_app
+    login(app)
+    monkeypatch.setattr(monitoring, "_utc_now", lambda: datetime(2026, 11, 8, 8, 0, tzinfo=UTC))
+    click(app, "暫停畫面更新")
+    assert not any("資料停止更新" in item.value for item in app.warning)
+    app.selectbox(key="monitor_device").select("legacy").run()
+    assert not any("資料停止更新" in item.value for item in app.warning)
+    assert any("不等待新的設備資料" in item.value for item in app.caption)
+
+
+def test_stall_threshold_respects_configured_sampling_interval(setup_app, monkeypatch):
+    app, api, _ = setup_app
+    catalog = api.monitoring_devices()
+    api.monitoring_devices = lambda: {**catalog, "sample_interval_seconds": 60}
+    monkeypatch.setattr(monitoring, "_utc_now", lambda: datetime(2026, 11, 8, 4, 2, tzinfo=UTC))
+    login(app)
+    assert app.session_state["monitor_stale_seconds"] == 180
+    assert not any("資料停止更新" in item.value for item in app.warning)
+    monkeypatch.setattr(monitoring, "_utc_now", lambda: datetime(2026, 11, 8, 4, 3, 2, tzinfo=UTC))
+    app.run()
+    assert any("資料停止更新" in item.value for item in app.warning)
+
+
+def test_measurement_age_never_displays_negative_seconds_for_future_timestamp(setup_app):
+    app, api, _ = setup_app
+    future = replace(event("21"), timestamp=datetime(2026, 11, 8, 4, 0, 3, tzinfo=UTC))
+    api.samples = [stored(future)]
+    login(app)
+    assert any("最新資料距今 0 秒" in item.value for item in app.caption)
+    assert not any("資料停止更新" in item.value for item in app.warning)

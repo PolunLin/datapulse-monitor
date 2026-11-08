@@ -9,6 +9,8 @@ from app.schemas.device import LEGACY_DEVICE_ID, LEGACY_DEVICE_NAME, DeviceCatal
 from app.schemas.monitoring import (
     MonitoringSampleFilters,
     MonitoringStatus,
+    SampleFeed,
+    SampleFeedFilters,
     SampleFilters,
     SamplePage,
     WebSocketControl,
@@ -38,7 +40,25 @@ async def devices(request: Request, principal: CurrentUser) -> DeviceCatalog:
             threshold=None,
         )
     )
-    return DeviceCatalog(items=items)
+    return DeviceCatalog(items=items, sample_interval_seconds=settings.simulator_interval_seconds)
+
+
+@router.get("/sample-feed", response_model=SampleFeed, responses=error_responses(422))
+async def sample_feed(
+    request: Request,
+    principal: CurrentUser,
+    filters: Annotated[SampleFeedFilters, Query()],
+) -> SampleFeed:
+    """Device-scoped committed samples in insertion order, without counting history.
+
+    Omit after_id for the latest bounded snapshot. Pass next_cursor as after_id
+    to fetch later commits; has_more means another bounded page is available.
+    A quiet feed preserves its cursor. Cursors are based on the single writer's
+    serial inserts, not measurement timestamps, so delayed older events are read.
+    """
+    return await MonitoringHistoryService(request.app.state.session_factory).feed(
+        principal, filters
+    )
 
 
 @router.get("/samples", response_model=SamplePage, responses=error_responses(422))

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any
+from weakref import finalize
 
 import httpx
 
@@ -83,7 +84,7 @@ _ERROR_MESSAGES = {
 
 
 class APIClient:
-    """One UI session per instance; short-lived request clients need no cleanup."""
+    """A bounded HTTP connection pool owned by one UI session or context manager."""
 
     def __init__(
         self,
@@ -94,22 +95,36 @@ class APIClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._token = token
-        self._transport = transport
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            timeout=httpx.Timeout(8.0, connect=3.0),
+            limits=httpx.Limits(
+                max_connections=4, max_keepalive_connections=2, keepalive_expiry=30
+            ),
+            follow_redirects=False,
+            trust_env=False,
+            transport=transport,
+        )
+        # Streamlit has no public browser-disconnect callback. Release the pool
+        # when an abandoned session is collected, as well as on explicit logout.
+        self._finalizer = finalize(self, self._client.close)
+
+    def close(self) -> None:
+        """Release connections; repeated cleanup is safe."""
+        self._finalizer()
+
+    def __enter__(self) -> "APIClient":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _request_response(
         self, method: str, path: str, *, import_errors: bool = False, **kwargs: Any
     ) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         try:
-            with httpx.Client(
-                base_url=self.base_url,
-                headers=headers,
-                timeout=httpx.Timeout(8.0, connect=3.0),
-                follow_redirects=False,
-                trust_env=False,
-                transport=self._transport,
-            ) as client:
-                response = client.request(method, path, **kwargs)
+            response = self._client.request(method, path, **kwargs)
         except httpx.TimeoutException:
             raise APIError(None, "後端回應逾時，請稍後再試。") from None
         except httpx.HTTPError:
@@ -190,6 +205,13 @@ class APIClient:
         return self._request(
             "GET",
             "/api/v1/monitoring/samples",
+            params={k: v for k, v in filters.items() if v is not None},
+        )
+
+    def monitoring_sample_feed(self, **filters: Any) -> dict:
+        return self._request(
+            "GET",
+            "/api/v1/monitoring/sample-feed",
             params={k: v for k, v in filters.items() if v is not None},
         )
 

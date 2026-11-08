@@ -78,3 +78,37 @@ async def list_samples(
         .limit(page_size)
     )
     return list(samples), total or 0
+
+
+async def list_sample_feed(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    after_id: int | None = None,
+    limit: int = 300,
+) -> tuple[list[RealtimeSample], int, bool]:
+    """Read a bounded committed feed without a history count or offset.
+
+    The single batch writer commits transactions serially, so insertion IDs are
+    a safe progress cursor in the supported single-worker deployment. Event
+    timestamps are not cursors: an older measurement may be committed later.
+    Parallel producers would need a commit-ordered cursor before using this API.
+    """
+    statement = select(RealtimeSample).where(RealtimeSample.device_id == device_id)
+    if after_id is None:
+        rows = list(
+            await session.scalars(statement.order_by(RealtimeSample.id.desc()).limit(limit))
+        )
+        rows.reverse()
+        return rows, rows[-1].id if rows else 0, False
+
+    rows = list(
+        await session.scalars(
+            statement.where(RealtimeSample.id > after_id)
+            .order_by(RealtimeSample.id.asc())
+            .limit(limit + 1)
+        )
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return rows, rows[-1].id if rows else after_id, has_more

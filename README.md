@@ -50,6 +50,7 @@ Swagger 同步列出各端點的錯誤狀態與 `error`／`request_id` 回應格
 | WebSocket | `/ws/v1/samples` | 所有已登入角色接收模擬監測事件 |
 | GET | `/api/v1/monitoring/devices` | 所有已登入角色查詢模擬設備清單 |
 | GET | `/api/v1/monitoring/samples` | 所有已登入角色查詢設備歷史、時間範圍與分頁 |
+| GET | `/api/v1/monitoring/sample-feed` | 所有已登入角色取得設備近期快照及游標增量資料 |
 | GET | `/api/v1/monitoring/history` | Admin 查詢已提交的監測歷史 |
 | GET | `/api/v1/monitoring/status` | Admin 查看生成器、批次寫入與連線狀態 |
 | GET / PUT | `/api/v1/monitoring/websocket` | Admin 查詢／即時切換 WebSocket，不重啟 REST API |
@@ -153,7 +154,7 @@ uv run --project frontend python scripts/frontend_smoke.py
 
 Compose 預設啟用單一模擬生成器，為 3 台固定設備各自每秒產生一筆溫度，合計約每秒 3 筆；分類為 `temperature`、單位 `°C`、預設閾值 80。設備有固定 ID，資料包含名稱、單位與事件當下閾值；隨機變化與偶發升溫模擬運作與異常。生成器隨服務啟動，不依賴任何人登入、開頁或訂閱。事件先進入有容量上限的持久化佇列，再廣播到各 WebSocket 連線的發送佇列。批次 writer 開始收集一批後，等待最多 5 秒或累積滿 100 筆就提交；每批使用自己的 ORM Session 與交易。資料庫故障重試或佇列積壓時，實際入庫延遲可能更長。
 
-進入監控頁會先啟動設備訂閱並讀取最近已保存資料，再按事件 ID 去重、時間排序。畫面定期同步最近歷史以補入延遲提交資料；更早的內容透過「查看歷史與分析」進入資料分析，帶入目前設備後分頁查詢，避免一次下載全部資料。升級前資料保留為 `legacy`（舊版未指定設備），不會猜測其所屬設備。詳見 [設備監控](docs/device-monitoring.md)。
+進入監控頁會先啟動設備訂閱並讀取最近已提交的 300 筆資料，再按事件 ID 去重、時間排序。之後約每 5 秒依提交游標補入新增資料，能接續延遲提交的舊時間事件，無須反覆載入完整窗口或計算歷史總筆數。畫面另依最新樣本時間顯示停滯告警，門檻為 10 秒或三倍設備取樣間隔，取較大值；暫停與 `legacy` 歷史排除。更早的內容透過「查看歷史與分析」進入資料分析，帶入目前設備後分頁查詢。詳見 [設備監控](docs/device-monitoring.md)。
 
 | 設定 | 預設值 | 用途 |
 | --- | --- | --- |
@@ -169,7 +170,7 @@ Compose 預設啟用單一模擬生成器，為 3 台固定設備各自每秒產
 | `WS_QUEUE_CAPACITY` | `100` | 每個客戶端發送佇列上限 |
 | `WS_SEND_TIMEOUT_SECONDS` | `2` | 單次網路發送逾時 |
 | `WS_AUTH_CHECK_INTERVAL_SECONDS` | `1` | 閒置連線重新驗證身分的間隔 |
-| `WS_MAX_CONNECTIONS` | `100` | 單一程序的 WebSocket 連線上限 |
+| `WS_MAX_CONNECTIONS` | `100` | 單一程序的 WebSocket 連線上限；`0` 表示不設應用層連線數上限 |
 
 WebSocket 使用 `Authorization: Bearer <token>` header，支援 `?device_id=device-001&category=temperature` 篩選。JWT 不接受放入 query string。連線成功先收到 `ready`，之後收到 `sample.created`；`event_id` 可用來對照歷史資料。登出、token 過期及帳號停用也會使既有連線失效。
 
@@ -204,6 +205,10 @@ uv run --project backend python scripts/realtime_demo.py --device-id device-001 
 正常關閉會先停止生成，再限時排空 writer、關閉連線並釋放 Engine。writer 排空逾時後，另給取消清理最多 1 秒；排空失敗會記錄未確認事件數。若程序突然崩潰，或資料庫持續不可用而超過關閉期限，尚在記憶體中的資料仍可能遺失。此版本無離線重播與跨程序廣播，部署維持單一 worker。
 
 ## 測試
+
+獨立環境的壓力、WebSocket 無上限容量與故障恢復測試見 [效能與可用性測試](docs/performance-testing.md)。測試使用專用 Compose、獨立資料庫與隨機憑證，不使用開發環境的 volume。
+
+本輪實測與限制見 [2026-11-08 驗證結果](docs/performance-results-2026-11-08.md)，包含無快取 Docker 建置、748 項容器內測試，以及資料生成、WebSocket、入庫、分析與容器重建的完整流程驗證。
 
 測試使用真正的 MariaDB 11.7.2、獨立 Compose project 與暫存資料庫；先執行遷移及 `alembic check`，再執行 Ruff 與 pytest。
 

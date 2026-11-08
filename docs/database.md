@@ -101,6 +101,8 @@ batch writer 使用 ORM 查詢已有事件 ID，再將尚未保存的事件以 `
 
 監測歷史索引為 `(timestamp, id)`、`(category, timestamp, id)`、`(device_id, timestamp, id)`，另有 `event_id` 唯一約束。歷史列表固定以 `timestamp DESC, id DESC` 排序，時間範圍同樣採半開區間。管理 history 每頁最多 100 筆，監控 samples 最多 300 筆供圖表初始化與同步；查詢筆數與資料使用同一個 REPEATABLE READ 快照。
 
+`0005_sample_feed_index` 增加 `(device_id, id)` 索引，既有資料保持原樣。監控畫面改用 `sample-feed`：首次按 ID 取得最近提交的最多 300 筆，之後以 `id > after_id` 遞增讀取新提交，不使用 `COUNT` 或 `OFFSET`。原有 samples/history API 的時間排序及分頁維持不變。ID 游標仰賴目前單一 writer 依序提交的部署限制，增加平行寫入者前需重新評估提交順序。
+
 ## `system_logs`
 
 第五階段的 `system_logs` 由 `0003_system_logs` 建立。一般日誌以唯一 `event_id` 避免不確定提交結果重試造成重複；管理操作紀錄直接參與使用者變更交易。`actor_id` 與 `target_user_id` 是稽核識別值，不設外鍵；角色／啟用狀態的前後值保存在 JSON `changes`，不包含密碼或 Token。
