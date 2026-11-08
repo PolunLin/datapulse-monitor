@@ -1,0 +1,39 @@
+name: DataPulse integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fresh startup and restart after bootstrap demotion
+        run: >-
+          python3 scripts/clean_environment_smoke.py
+          --project datapulse-clean-${{ github.run_id }}-${{ github.run_attempt }}
+          --backend-port 18010 --frontend-port 18510
+
+  mariadb-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create isolated development configuration
+        run: python3 scripts/init_env.py
+      - name: Test against migrated MariaDB 11.7
+        run: docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --profile test run --build --rm tests
+      - name: Test Streamlit views and frontend clients
+        run: docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --profile test run --build --rm --no-deps frontend-tests
+      - name: Show service diagnostics on failure
+        if: failure()
+        run: docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --profile test logs --no-color --tail=150
+      - name: Remove isolated CI containers and volumes
+        if: always()
+        run: docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --profile test down --volumes --remove-orphans

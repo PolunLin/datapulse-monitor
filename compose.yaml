@@ -1,0 +1,100 @@
+name: datapulse-monitor
+
+x-backend-environment: &backend-environment
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: ${DB_NAME:-datapulse}
+  DB_USER: ${DB_USER:-datapulse}
+  DB_PASSWORD: ${DB_PASSWORD:?Run python3 scripts/init_env.py first}
+  JWT_SECRET: ${JWT_SECRET:?Run python3 scripts/init_env.py first}
+  JWT_ISSUER: datapulse
+  JWT_AUDIENCE: datapulse-api
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  SIMULATOR_ENABLED: ${SIMULATOR_ENABLED:-true}
+  SIMULATOR_INTERVAL_SECONDS: ${SIMULATOR_INTERVAL_SECONDS:-1}
+  SIMULATOR_CATEGORY: ${SIMULATOR_CATEGORY:-temperature}
+  SIMULATOR_THRESHOLD: ${SIMULATOR_THRESHOLD:-80}
+  REALTIME_BATCH_SIZE: ${REALTIME_BATCH_SIZE:-100}
+  REALTIME_FLUSH_INTERVAL_SECONDS: ${REALTIME_FLUSH_INTERVAL_SECONDS:-5}
+  REALTIME_QUEUE_CAPACITY: ${REALTIME_QUEUE_CAPACITY:-1000}
+  REALTIME_RETRY_INITIAL_SECONDS: ${REALTIME_RETRY_INITIAL_SECONDS:-0.1}
+  REALTIME_RETRY_MAX_SECONDS: ${REALTIME_RETRY_MAX_SECONDS:-5}
+  REALTIME_SHUTDOWN_TIMEOUT_SECONDS: ${REALTIME_SHUTDOWN_TIMEOUT_SECONDS:-10}
+  WS_ENABLED: ${WS_ENABLED:-true}
+  WS_QUEUE_CAPACITY: ${WS_QUEUE_CAPACITY:-100}
+  WS_SEND_TIMEOUT_SECONDS: ${WS_SEND_TIMEOUT_SECONDS:-2}
+  WS_AUTH_CHECK_INTERVAL_SECONDS: ${WS_AUTH_CHECK_INTERVAL_SECONDS:-1}
+  WS_MAX_CONNECTIONS: ${WS_MAX_CONNECTIONS:-100}
+
+x-backend-build: &backend-build
+  context: ./backend
+  target: runtime
+
+services:
+  db:
+    image: mariadb:11.7.2
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-datapulse}
+      MARIADB_USER: ${DB_USER:-datapulse}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Run python3 scripts/init_env.py first}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Run python3 scripts/init_env.py first}
+      TZ: UTC
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    build: *backend-build
+    environment:
+      <<: *backend-environment
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    command: ["sh", "-c", "alembic upgrade head && python -m app.cli.seed"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build: *backend-build
+    environment: *backend-environment
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8010}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    init: true
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      target: runtime
+    environment:
+      API_BASE_URL: http://backend:8000
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8010}
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8510}:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:
