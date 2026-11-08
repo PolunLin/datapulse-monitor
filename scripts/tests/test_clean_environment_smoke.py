@@ -187,6 +187,12 @@ def test_prepare_overrides_inherited_compose_and_credentials(tmp_path, monkeypat
     assert "COMPOSE_FILE" not in instance.environment
     assert instance.environment["DB_PASSWORD"] == "generated-db"
     assert instance.environment["BACKEND_PORT"] == "18010"
+    assert instance.sensitive_values == {
+        "generated-jwt",
+        "generated-db",
+        "generated-root",
+        "generated-admin",
+    }
     assert instance.owns_env and not instance.owns_resources
     instance.cleanup()
 
@@ -203,3 +209,220 @@ def test_main_cleans_owned_resources_even_on_interrupted_verification(
     assert smoke.main([]) == 130
     assert calls == ["cleanup"]
     assert "private-password" not in capsys.readouterr().err
+
+
+def test_api_remembers_login_credentials_and_tokens_for_diagnostic_redaction(monkeypatch):
+    values = set()
+    client = smoke.API("http://test", sensitive_values=values)
+    monkeypatch.setattr(
+        client, "request", lambda *_args, **_kwargs: {"access_token": "private-token"}
+    )
+    assert client.login("private@example.com", "private-password") == "private-token"
+    assert values == {"private@example.com", "private-password", "private-token"}
+
+
+def test_diagnostic_logs_keep_operational_events_without_credentials_bodies_or_sql():
+    private_values = {"private-jwt", "private-password", "private-token", "private@example.com"}
+    logs = "\n".join(
+        [
+            json.dumps(
+                {
+                    "message": "Database operation failed",
+                    "level": "ERROR",
+                    "error_type": "OperationalError",
+                    "request_body": {"title": "private-body", "password": "private-password"},
+                    "sql": "SELECT secret FROM users",
+                    "parameters": {"email": "private@example.com"},
+                    "authorization": "Bearer private-token",
+                    "jwt_secret": "private-jwt",
+                    "path": "/private-path?token=private-token",
+                    "status_code": 503,
+                }
+            ),
+            "OperationalError: bound SQL parameter private-sql-value",
+            "mariadb | Access denied for user private@example.com using private-password",
+            "request body private-unlabelled-value",
+            "JWT_SECRET=private-jwt",
+        ]
+    )
+    result = smoke.diagnostic_logs(logs, private_values)
+    events = [json.loads(line) for line in result.splitlines()]
+    assert events[0] == {
+        "event": "Database operation failed",
+        "level": "ERROR",
+        "error_type": "OperationalError",
+        "status_code": 503,
+    }
+    assert events[1] == {"error_type": "OperationalError"}
+    assert events[2] == {"event": "Database authentication denied"}
+    assert events[-1] == {"omitted_unstructured_lines": 2}
+    assert "private-" not in result
+    assert "SELECT" not in result and "parameters" not in result
+
+
+def test_diagnostics_replace_registered_sensitive_values_even_in_allowed_events():
+    output = smoke.diagnostic_logs("Application resources initialized", {"resources", ""})
+    assert "resources" not in output
+    assert "[REDACTED]" in output
+
+
+@pytest.mark.parametrize(
+    "line,event",
+    [
+        ("Starting MariaDB 11.7.2 source revision private-revision", "MariaDB server starting"),
+        ("Initializing database files at private-path", "Database initialization starting"),
+        ("Database files initialized at private-path", "Database initialization complete"),
+        ("MariaDB init process done. Ready for start up.", "Database bootstrap complete"),
+        (
+            "INFO [alembic.runtime.migration] Context impl MySQLImpl.",
+            "Alembic MySQL migration context initialized",
+        ),
+        (
+            "INFO [alembic.runtime.migration] Running upgrade private-old -> private-new",
+            "Database migration running",
+        ),
+    ],
+)
+def test_startup_logs_retain_canonical_database_and_migration_events(line, event):
+    result = smoke.diagnostic_logs(line, set())
+    assert json.loads(result.splitlines()[0]) == {"event": event}
+    assert "private-" not in result
+
+
+def test_main_collects_owned_service_diagnostics_before_cleanup(tmp_path, monkeypatch):
+    instance = deployment(tmp_path)
+    directory = tmp_path / "artifacts"
+    calls = []
+    monkeypatch.setattr(smoke, "Deployment", lambda *_args: instance)
+
+    def prepare():
+        instance.owns_env = instance.owns_resources = True
+        return {}
+
+    def compose(*args, **_kwargs):
+        calls.append(args)
+        if args[0] == "ps":
+            return json.dumps(
+                [
+                    {
+                        "Service": "migrate",
+                        "State": "exited",
+                        "Health": "",
+                        "ExitCode": 1,
+                        "Command": "password=private-command",
+                        "Labels": "private-environment",
+                    }
+                ]
+            )
+        return "OperationalError: private-sql-parameter"
+
+    monkeypatch.setattr(instance, "prepare", prepare)
+    monkeypatch.setattr(instance, "compose", compose)
+    monkeypatch.setattr(instance, "cleanup", lambda: calls.append(("cleanup",)))
+    monkeypatch.setattr(
+        smoke, "verify", lambda *_args: (_ for _ in ()).throw(smoke.SmokeFailure("failed"))
+    )
+    assert smoke.main(["--diagnostics-dir", str(directory)]) == 1
+    assert calls[0] == ("ps", "--all", "--format", "json")
+    assert calls[-1] == ("cleanup",)
+    assert len(calls) == 6
+    assert json.loads((directory / "service-status.json").read_text()) == [
+        {
+            "service": "migrate",
+            "state": "exited",
+            "health": "",
+            "exit_code": 1,
+        }
+    ]
+    assert all((directory / f"{service}.log").exists() for service in smoke.DIAGNOSTIC_SERVICES)
+    assert "private-" not in "".join(path.read_text() for path in directory.iterdir())
+
+
+def test_diagnostic_collection_continues_when_a_service_query_fails(tmp_path, monkeypatch):
+    instance = deployment(tmp_path)
+    instance.owns_env = instance.owns_resources = True
+    directory = tmp_path / "artifacts"
+
+    def compose(*args, **_kwargs):
+        if args[0] == "ps" or args[-1] == "db":
+            raise smoke.SmokeFailure("private-exception")
+        return "Application startup complete."
+
+    monkeypatch.setattr(instance, "compose", compose)
+    instance.collect_diagnostics(directory)
+    summary = (directory / "collection.txt").read_text()
+    assert "Service status unavailable" in summary
+    assert "db log summary unavailable" in summary
+    assert (directory / "backend.log").exists()
+    assert "private-exception" not in "".join(path.read_text() for path in directory.iterdir())
+
+
+def test_diagnostic_commands_use_short_timeout_without_changing_other_compose_calls(
+    tmp_path, monkeypatch
+):
+    instance = deployment(tmp_path)
+    instance.env_file.write_text("private-owned-environment")
+    instance.owns_env = instance.owns_resources = True
+    commands = []
+
+    def execute(args, **kwargs):
+        commands.append((args, kwargs))
+        return "[]" if "ps" in args else ""
+
+    monkeypatch.setattr(smoke, "execute", execute)
+    instance.collect_diagnostics(tmp_path / "artifacts")
+    instance.compose("up", "-d")
+    instance.cleanup()
+    assert len(commands) == 7
+    assert [kwargs["timeout"] for _, kwargs in commands] == [10] * 5 + [600, 600]
+    assert commands[-2][0][-2:] == ["up", "-d"]
+    assert commands[-1][0][-3:] == ["down", "--volumes", "--remove-orphans"]
+
+
+def test_diagnostic_collection_failure_does_not_prevent_cleanup(tmp_path, monkeypatch, capsys):
+    instance = deployment(tmp_path)
+    calls = []
+    monkeypatch.setattr(smoke, "Deployment", lambda *_args: instance)
+    monkeypatch.setattr(instance, "prepare", dict)
+    monkeypatch.setattr(
+        smoke, "verify", lambda *_args: (_ for _ in ()).throw(smoke.SmokeFailure("failed"))
+    )
+    monkeypatch.setattr(
+        instance,
+        "collect_diagnostics",
+        lambda *_args: (_ for _ in ()).throw(OSError("private-directory")),
+    )
+    monkeypatch.setattr(instance, "cleanup", lambda: calls.append("cleanup"))
+    assert smoke.main(["--diagnostics-dir", str(tmp_path / "artifacts")]) == 1
+    assert calls == ["cleanup"]
+    assert "private-directory" not in capsys.readouterr().err
+
+
+def test_existing_deployment_is_never_read_for_diagnostics(tmp_path, monkeypatch):
+    instance = deployment(tmp_path)
+    instance.env_file.write_text("PRIVATE=preserve")
+    directory = tmp_path / "artifacts"
+    monkeypatch.setattr(smoke, "Deployment", lambda *_args: instance)
+    monkeypatch.setattr(
+        smoke, "execute", lambda *_args, **_kwargs: pytest.fail("must not inspect Docker")
+    )
+    monkeypatch.setattr(
+        smoke, "read_generated_environment", lambda *_args: pytest.fail("must not read .env")
+    )
+    assert smoke.main(["--diagnostics-dir", str(directory)]) == 1
+    assert not directory.exists()
+    assert instance.env_file.read_text() == "PRIVATE=preserve"
+
+
+@pytest.mark.parametrize("owns_env,owns_resources", [(False, False), (True, False), (False, True)])
+def test_diagnostics_require_both_environment_and_resource_ownership(
+    tmp_path, monkeypatch, owns_env, owns_resources
+):
+    instance = deployment(tmp_path)
+    instance.owns_env, instance.owns_resources = owns_env, owns_resources
+    monkeypatch.setattr(
+        instance, "compose", lambda *_args: pytest.fail("must not inspect unowned resources")
+    )
+    directory = tmp_path / "artifacts"
+    instance.collect_diagnostics(directory)
+    assert not directory.exists()

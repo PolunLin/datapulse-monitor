@@ -27,6 +27,49 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_PATTERN = re.compile(r"datapulse-clean-[a-z0-9][a-z0-9-]{0,39}\Z")
+DIAGNOSTIC_SERVICES = ("db", "migrate", "backend", "frontend")
+SAFE_LOG_MESSAGES = (
+    "Application resources initialized",
+    "Application resources released",
+    "Database readiness check failed",
+    "Database operation failed",
+    "Unhandled application error",
+    "HTTP request completed",
+    "Background task failed",
+    "Simulator shutdown failed",
+    "Batch writer shutdown failed",
+    "WebSocket shutdown failed",
+    "System log writer shutdown failed",
+    "Database resource cleanup failed",
+    "WebSocket transport failed",
+    "WebSocket authentication unavailable",
+    "Some WebSocket handlers exceeded the shutdown deadline",
+    "Batch writer cancellation cleanup exceeded its deadline",
+    "Bootstrap admin is not configured; seed skipped.",
+    "Bootstrap account already exists; account settings were left unchanged.",
+    "Bootstrap admin created.",
+    "Application startup complete.",
+    "Application shutdown complete.",
+    "Waiting for application startup.",
+    "Waiting for application shutdown.",
+)
+SAFE_ERROR_TYPES = {
+    "AssertionError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ImportError",
+    "IntegrityError",
+    "InterfaceError",
+    "ModuleNotFoundError",
+    "OperationalError",
+    "PermissionError",
+    "ProgrammingError",
+    "RuntimeError",
+    "TimeoutError",
+    "TypeError",
+    "ValidationError",
+    "ValueError",
+}
 WS_PROBE = """import json, sys
 from websockets.sync.client import connect
 credentials = json.load(sys.stdin)
@@ -70,11 +113,14 @@ def execute(args: list[str], *, cwd: Path, env=None, input_text=None, timeout=60
 
 
 class API:
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, sensitive_values=None) -> None:
         self.base_url = base_url
         self.opener = build_opener(ProxyHandler({}))
+        self.sensitive_values = sensitive_values if sensitive_values is not None else set()
 
     def request(self, method, path, *, token=None, payload=None, form=None, expected=200):
+        if token:
+            self.sensitive_values.add(token)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         data = None
         if payload is not None:
@@ -103,9 +149,76 @@ class API:
             raise SmokeFailure("A service returned an unexpected response format.") from exc
 
     def login(self, email, password):
-        return self.request(
+        self.sensitive_values.update((email, password))
+        token = self.request(
             "POST", "/api/v1/auth/login", form={"username": email, "password": password}
         )["access_token"]
+        self.sensitive_values.add(token)
+        return token
+
+
+def diagnostic_logs(output: str, sensitive_values: set[str]) -> str:
+    """Emit allowlisted events only, never free-form log/traceback/request/SQL text."""
+    events = []
+    omitted = 0
+    for line in output.splitlines():
+        try:
+            entry = json.loads(line)
+        except (TypeError, ValueError):
+            entry = None
+        message = entry.get("message", "") if isinstance(entry, dict) else line
+        # Reconstruct canonical messages instead of keeping arbitrary text around them.
+        event = next((known for known in SAFE_LOG_MESSAGES if known in str(message)), None)
+        if event is None:
+            for marker, canonical in (
+                ("ready for connections", "Database ready for connections"),
+                ("Starting MariaDB", "MariaDB server starting"),
+                ("Entrypoint script for MariaDB Server", "MariaDB entrypoint running"),
+                ("Initializing database files", "Database initialization starting"),
+                ("Database files initialized", "Database initialization complete"),
+                ("Starting temporary server", "Database temporary server starting"),
+                ("Temporary server started", "Database temporary server started"),
+                ("Temporary server stopped", "Database temporary server stopped"),
+                ("MariaDB init process done", "Database bootstrap complete"),
+                ("Access denied for user", "Database authentication denied"),
+                ("Unknown database", "Database not found"),
+                ("No space left on device", "Storage is full"),
+                ("Permission denied", "Permission denied"),
+                ("Running upgrade", "Database migration running"),
+                ("Context impl MySQLImpl", "Alembic MySQL migration context initialized"),
+                ("Will assume non-transactional DDL", "Alembic using nontransactional DDL"),
+                ("Uvicorn running on", "API server listening"),
+                ("You can now view your Streamlit app", "Streamlit server listening"),
+            ):
+                if marker in str(message):
+                    event = canonical
+                    break
+        details = {"event": event} if event else {}
+        if isinstance(entry, dict):
+            if entry.get("level") in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+                details["level"] = entry["level"]
+            if entry.get("error_type") in SAFE_ERROR_TYPES:
+                details["error_type"] = entry["error_type"]
+            status = entry.get("status_code")
+            if type(status) is int and 100 <= status <= 599:
+                details["status_code"] = status
+        else:
+            error = next(
+                (name for name in sorted(SAFE_ERROR_TYPES) if re.search(rf"\b{name}\b", line)),
+                None,
+            )
+            if error:
+                details["error_type"] = error
+        if details:
+            events.append(json.dumps(details, sort_keys=True))
+        else:
+            omitted += 1
+    events.append(json.dumps({"omitted_unstructured_lines": omitted}))
+    result = "\n".join(events) + "\n"
+    for value in sorted(sensitive_values, key=len, reverse=True):
+        if value:
+            result = result.replace(value, "[REDACTED]")
+    return result
 
 
 def wait_for(check, timeout=90):
@@ -173,8 +286,9 @@ class Deployment:
         self.environment = None
         self.owns_env = False
         self.owns_resources = False
+        self.sensitive_values = set()
 
-    def compose(self, *args, input_text=None):
+    def compose(self, *args, input_text=None, timeout=600):
         return execute(
             [
                 "docker",
@@ -190,6 +304,7 @@ class Deployment:
             cwd=self.root,
             env=self.environment,
             input_text=input_text,
+            timeout=timeout,
         )
 
     def prepare(self):
@@ -202,6 +317,11 @@ class Deployment:
         execute([sys.executable, "scripts/init_env.py"], cwd=self.root)
         self.owns_env = True
         values = read_generated_environment(self.env_file)
+        self.sensitive_values.update(
+            value
+            for key, value in values.items()
+            if any(marker in key for marker in ("PASSWORD", "SECRET", "TOKEN", "EMAIL"))
+        )
         self.environment = {
             key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")
         }
@@ -216,7 +336,7 @@ class Deployment:
     def start(self, *, build):
         self.owns_resources = True
         self.compose("up", "-d", "--build" if build else "--no-build")
-        api = API(f"http://127.0.0.1:{self.backend_port}")
+        api = API(f"http://127.0.0.1:{self.backend_port}", sensitive_values=self.sensitive_values)
         wait_for(lambda: api.request("GET", "/health/ready").get("status") == "ok")
         opener = build_opener(ProxyHandler({}))
 
@@ -262,6 +382,62 @@ class Deployment:
             self.env_file.unlink()
             self.owns_env = False
 
+    def collect_diagnostics(self, directory: Path):
+        """Inspect only this invocation's owned stack, before cleanup removes it."""
+        if not self.owns_resources or not self.owns_env:
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        errors = []
+        try:
+            output = self.compose("ps", "--all", "--format", "json", timeout=10)
+            try:
+                rows = json.loads(output)
+            except ValueError:
+                rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+            if isinstance(rows, dict):
+                rows = [rows]
+            states = {"created", "running", "exited", "restarting", "removing", "paused", "dead"}
+            statuses = []
+            for row in rows:
+                if not isinstance(row, dict) or row.get("Service") not in DIAGNOSTIC_SERVICES:
+                    continue
+                status = {"service": row["Service"]}
+                if row.get("State") in states:
+                    status["state"] = row["State"]
+                if row.get("Health") in {"", "starting", "healthy", "unhealthy"}:
+                    status["health"] = row["Health"]
+                if type(row.get("ExitCode")) is int:
+                    status["exit_code"] = row["ExitCode"]
+                statuses.append(status)
+            (directory / "service-status.json").write_text(
+                json.dumps(statuses, indent=2) + "\n", encoding="utf-8"
+            )
+        except (SmokeFailure, OSError, ValueError, TypeError):
+            errors.append("Service status unavailable.")
+        for service in DIAGNOSTIC_SERVICES:
+            try:
+                output = self.compose(
+                    "logs",
+                    "--no-color",
+                    "--no-log-prefix",
+                    "--tail",
+                    "150",
+                    service,
+                    timeout=10,
+                )
+                (directory / f"{service}.log").write_text(
+                    diagnostic_logs(output, self.sensitive_values), encoding="utf-8"
+                )
+            except (SmokeFailure, OSError, ValueError, TypeError):
+                errors.append(f"{service} log summary unavailable.")
+        (directory / "collection.txt").write_text(
+            "Diagnostics include only service state and allowlisted log summaries.\n"
+            "Free-form messages, request/response bodies, SQL and configuration are omitted.\n"
+            + "\n".join(errors)
+            + "\n",
+            encoding="utf-8",
+        )
+
 
 def persisted_sample(api, token, event_id):
     result = api.request(
@@ -292,6 +468,7 @@ def verify(deployment: Deployment, credentials):
             f"clean-{role}-{secrets.token_hex(5)}@example.com",
             secrets.token_urlsafe(24),
         )
+        deployment.sensitive_values.update((email, password))
         user = api.request(
             "POST",
             "/api/v1/auth/register",
@@ -392,6 +569,7 @@ def arguments(argv=None):
     parser.add_argument("--project", default="datapulse-clean-" + secrets.token_hex(6))
     parser.add_argument("--backend-port", type=int, default=18010)
     parser.add_argument("--frontend-port", type=int, default=18510)
+    parser.add_argument("--diagnostics-dir", type=Path)
     options = parser.parse_args(argv)
     if not PROJECT_PATTERN.fullmatch(options.project):
         parser.error(
@@ -419,6 +597,11 @@ def main(argv=None):
         print("FAIL: unexpected acceptance failure; credentials were not printed.", file=sys.stderr)
         result = 1
     finally:
+        if result and options.diagnostics_dir is not None:
+            try:
+                deployment.collect_diagnostics(options.diagnostics_dir)
+            except (SmokeFailure, OSError, ValueError, TypeError):
+                print("FAIL: diagnostic collection was unavailable.", file=sys.stderr)
         try:
             deployment.cleanup()
         except Exception:

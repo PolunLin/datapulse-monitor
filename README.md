@@ -215,6 +215,28 @@ docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --
 
 清理指令僅針對 `datapulse-monitor-test`。測試 fixture 強制資料庫名稱以 `_test` 結尾才允許清理資料；正式開發 volume 不會被測試使用。
 
+### CI 與合併條件
+
+GitHub Actions 在 push、Pull Request、merge queue 與手動觸發時執行三個互相獨立的工作：
+
+| 工作 | 驗證內容 | 保存結果 |
+| --- | --- | --- |
+| `mariadb-integration` | 後端與指令的 Ruff、pytest、真實 MariaDB 遷移及 metadata 檢查 | JUnit XML、測試輸出、失敗時的資料庫／遷移服務日誌與狀態 |
+| `frontend-tests` | Streamlit／客戶端的 Ruff、格式檢查與 pytest，不依賴後端工作結果 | JUnit XML、測試輸出與失敗容器日誌 |
+| `clean-deployment` | 全新環境啟動、權限、WebSocket、入庫及重啟後保存 | 驗收輸出、失敗時經過濾的服務狀態與日誌摘要 |
+
+每次執行的 Actions 頁面下方 **Artifacts** 提供三份結果，設定保留 14 天。成功與失敗都會上傳；若建置、遷移或程式碼檢查在 pytest 前失敗，沒有 JUnit XML 屬預期情況，請先查看 `test.log`。pytest 成功後若無法匯出 JUnit XML，工作仍會失敗。診斷收集在清理前執行；不會上傳 `.env`。前後端各使用獨立 Compose project，互不阻擋。
+
+`DataPulse CI required` 是固定名稱的彙總檢查，只有上述三個工作全部成功才會通過；失敗、取消或跳過都不算成功。要在 GitHub 強制執行合併條件，需另於預設分支 `main` 的 **Settings → Branches → Branch protection rules** 設定：
+
+1. 啟用 **Require a pull request before merging**；單人維護可將必要核准數設為 0。
+2. 啟用 **Require status checks to pass before merging**，選擇 `DataPulse CI required`，並啟用 **Require branches to be up to date before merging**。
+3. 啟用 **Do not allow bypassing the above settings**，讓管理員也遵守條件；保留其他既有保護規則。
+
+Workflow 本身不會建立分支保護。私人儲存庫需要支援此功能的 GitHub 方案（個人帳號為 GitHub Pro）；若 GitHub 顯示需升級方案，上述強制規則尚未生效。官方說明見 [分支保護](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)與 [Actions 結果保存](https://docs.github.com/en/actions/tutorials/store-and-share-data)。
+
+2026-11-08 實際查詢本儲存庫：目前帳號具有 Admin 權限，但分支保護與規則集 API 均回覆 403，要求升級 GitHub Pro。因此強制合併規則尚未啟用。此輪本機驗證為後端與指令測試 414 項、前端 248 項全部通過；另通過完整啟動／重啟、實際失敗診斷保存、測試失敗時的 JUnit 匯出、成功時報告缺失阻擋，以及合併檢查的 64 種狀態組合。GitHub Actions 設定經 actionlint 檢查通過。
+
 ### 乾淨環境與完整啟動驗收
 
 先將已提交的版本 clone 到另一個目錄，在該副本執行下列命令；副本不能已有 `.env`，也不需要先執行 `init_env.py`。
@@ -222,6 +244,8 @@ docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --
 ```bash
 python3 scripts/clean_environment_smoke.py --project datapulse-clean-acceptance --backend-port 18010 --frontend-port 18510
 ```
+
+若要保留失敗診斷，加上 `--diagnostics-dir artifacts/clean-deployment`；只會收集本次腳本擁有的測試環境，在清理前輸出服務狀態、允許的事件與錯誤類型。任意日誌文字、請求本文、SQL 參數及憑證不會保存。
 
 腳本產生獨立憑證，驗證 MariaDB → Alembic → Bootstrap → FastAPI → Streamlit 的完整啟動鏈，以及三角色、CRUD、Swagger、WebSocket 與批次入庫。接著由第二位 Admin 將初始化管理員降為 Viewer，移除容器但保留該測試專案的 volume，再啟動整套服務，確認角色、資料及監測歷史均保留且繼續產生新事件。
 
