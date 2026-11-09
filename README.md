@@ -1,5 +1,11 @@
 # DataPulse — 即時資料分析與監控
 
+## 中文 Demo（7 分 20 秒）
+
+
+
+https://github.com/user-attachments/assets/b620905c-006f-46cd-8720-9f6b0f1ee852
+
 目前提供 FastAPI REST API、JWT 認證、角色／資料擁有權控制，以及模擬資料生成、WebSocket 即時推送與 MariaDB 批次持久化。資料庫使用 MariaDB 11.7.2、SQLAlchemy ORM、asyncmy 與 Alembic。Streamlit 提供登入／註冊／登出、資料 CRUD、即時圖表、異常告警、統計分析與匯入／匯出；第五階段新增 Admin 使用者管理、系統日誌、資料庫狀態及即時歷史管理頁面。
 
 ## 快速啟動
