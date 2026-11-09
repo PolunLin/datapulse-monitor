@@ -6,7 +6,30 @@
 
 https://github.com/user-attachments/assets/b620905c-006f-46cd-8720-9f6b0f1ee852
 
-目前提供 FastAPI REST API、JWT 認證、角色／資料擁有權控制，以及模擬資料生成、WebSocket 即時推送與 MariaDB 批次持久化。資料庫使用 MariaDB 11.7.2、SQLAlchemy ORM、asyncmy 與 Alembic。Streamlit 提供登入／註冊／登出、資料 CRUD、即時圖表、異常告警、統計分析與匯入／匯出；第五階段新增 Admin 使用者管理、系統日誌、資料庫狀態及即時歷史管理頁面。
+DataPulse 是即時資料分析與監控系統，使用 FastAPI、Streamlit 與 MariaDB 11.7.2。三台模擬設備各自每秒產生資料，透過 WebSocket 推送、SQLAlchemy ORM 批次保存，並提供資料管理、分析與 Admin 管理功能。
+
+## 已完成功能與題目對照
+
+已完成使用者管理、資料管理、即時監控、資料分析與系統管理五大模組，並提供 Docker Compose 部署。下表列出題目要求與實作位置，操作方式見 [功能操作展示](docs/demo.md)。
+
+| 題目要求 | 已完成內容 | 操作位置／說明 |
+| --- | --- | --- |
+| FastAPI、RESTful API、CRUD | 依 HTTP 方法提供新增、讀取、修改、刪除與對應狀態碼 | `/api/v1/records`、`/api/v1/records/{id}`；Swagger `/docs` |
+| JWT、註冊、登入／登出、三角色 | Admin／User／Viewer；登出與權限變更可撤銷既有 token | 登入頁、側邊欄、系統管理 |
+| 創建者或 Admin 才能更新／刪除 | 後端檢查角色與資料擁有者；Viewer 唯讀 | [權限與輸入規則](docs/demo.md#權限與輸入驗證) |
+| 非同步、Pydantic、Swagger、錯誤與日誌 | 非同步 API／資料庫存取、輸入驗證、API 文件、統一錯誤及 Request ID | [系統架構](docs/architecture.md)、[系統日誌](docs/admin.md) |
+| MariaDB 11.7、SQLAlchemy ORM | MariaDB 11.7.2；資料讀寫使用 ORM，沒有手寫 SQL 查詢或資料變更 | [資料庫設計](docs/database.md) |
+| Alembic、連線池、asyncmy | 結構遷移、非同步 Session 與 Engine 連線池 | [遷移管理](backend/migrations)、[連線設定](backend/app/db/session.py) |
+| 定期或條件觸發批次寫入 | 每批滿 100 筆或等待最多 5 秒提交 | [即時推送與批次寫入](#即時推送與批次寫入) |
+| Streamlit、多頁面、Session、API 整合 | 各頁串接後端；登入狀態、表單與圖表依 Session 管理 | [前端操作](docs/frontend.md) |
+| 標題、數值、分類、時間戳；分頁／篩選／排序 | 資料新增、查詢、編輯、刪除；分類使用設備 A／B／C | 資料管理 |
+| CSV／JSON 批量導入 | 逐列驗證，全部通過後整批寫入；介面阻擋同次登入重複匯入 | 資料管理 → 批次匯入；[示範資料](sample_data/README.md) |
+| 每秒隨機資料、WebSocket、折線圖／柱狀圖、異常告警 | 三設備各每秒一筆，持續推送並更新圖表；超過閾值標示異常 | 即時監控；[設備監控說明](docs/device-monitoring.md) |
+| 統計、時間查詢、分類聚合、趨勢、Excel | 總計、平均、最大／最小；個人與系統資料分開查詢並可匯出 | 資料分析；[分析與資料交換](docs/analytics.md) |
+| Admin 使用者列表、權限、日誌、資料庫狀態、歷史管理 | 提供管理頁面；歷史入口整合至資料分析，讀取範圍如下 | 系統管理；[Admin 操作](docs/admin.md) |
+| Docker 多階段建置、Compose、網路、Volume、環境變數 | 前後端多階段建置、多容器通訊、資料保存與環境設定 | [快速啟動](#快速啟動)、[Compose 設定](compose.yaml) |
+
+**歷史查詢範圍：** 系統管理頁、`/admin/*` 及 `/api/v1/monitoring/history` 限 Admin；設備歷史 `/api/v1/monitoring/samples`、`sample-feed`、系統來源分析與匯出則開放所有已登入角色。
 
 ## 快速啟動
 
@@ -38,7 +61,7 @@ docker compose ps
 - Bootstrap 只在 email 不存在時建立初始管理員；既有帳號的角色、啟用狀態、密碼與 Token 版本都保持原樣。管理員被另一位 Admin 降權或停用後，重新執行遷移及初始化仍可成功啟動，不會自動升權或重新啟用。
 - 若不需要初始管理員，將兩個 `BOOTSTRAP_ADMIN_*` 設定都留空。
 - JWT 使用 HS256、有效期限、issuer、audience 與資料庫 token version 驗證；每次請求重新檢查使用者是否啟用及目前角色。
-- **登出會撤銷該帳號所有已發出的 token**。第一階段不提供 refresh token。
+- **登出會撤銷該帳號所有已發出的 token**。目前不提供 refresh token。
 
 Swagger 操作：先執行註冊，接著按 **Authorize**，在 `username` 填寫 email、`password` 填寫密碼。登入端點使用 OAuth2 form，其他資料端點使用 JSON。
 
@@ -114,11 +137,11 @@ uv run --project frontend python scripts/frontend_smoke.py
 |---|---|
 | 資料來源 | 我的資料固定查登入者的 `records`；系統來源查已提交的 `realtime_samples`，所有角色可讀 |
 | 統計 | 筆數、總和、平均、最大、最小；台灣時間（UTC+8）分時／分日，分類及時間桶各最多 1,000 組 |
-| 匯入 | 2 MiB、5,000 筆；整批交易，擁有者為登入者；重複上傳會新增另一批 |
+| 匯入 | 2 MiB、5,000 筆；整批交易，擁有者為登入者；介面在同一登入 Session 阻擋已成功匯入的相同內容，API 或重新登入後重傳仍可能新增另一批 |
 | 匯出 | 最多 10,000 筆，超過需縮小條件；精確數值以 Excel 文字儲存 |
 | 時間 | 所有篩選採 `[start_time, end_time)`；省略匯入時間則使用目前 UTC |
 
-詳見 [API、檔案規則與驗收步驟](docs/analytics.md)。本階段不需新增 Alembic 遷移，沿用既有資料表與索引。
+詳見 [API、檔案規則與操作步驟](docs/analytics.md)。
 
 ## Admin 系統管理
 
@@ -214,7 +237,7 @@ uv run --project backend python scripts/realtime_demo.py --device-id device-001 
 
 獨立環境的壓力、WebSocket 無上限容量與故障恢復測試見 [效能與可用性測試](docs/performance-testing.md)。測試使用專用 Compose、獨立資料庫與隨機憑證，不使用開發環境的 volume。
 
-本輪實測與限制見 [2026-11-08 驗證結果](docs/performance-results-2026-11-08.md)，包含無快取 Docker 建置、748 項容器內測試，以及資料生成、WebSocket、入庫、分析與容器重建的完整流程驗證。
+專案附有自動化測試，可使用下列指令自行執行。
 
 測試使用真正的 MariaDB 11.7.2、獨立 Compose project 與暫存資料庫；先執行遷移及 `alembic check`，再執行 Ruff 與 pytest。
 
@@ -226,27 +249,9 @@ docker compose -p datapulse-monitor-test -f compose.yaml -f compose.test.yaml --
 
 清理指令僅針對 `datapulse-monitor-test`。測試 fixture 強制資料庫名稱以 `_test` 結尾才允許清理資料；正式開發 volume 不會被測試使用。
 
-### CI 與合併條件
+### 持續整合
 
-GitHub Actions 在 push、Pull Request、merge queue 與手動觸發時執行三個互相獨立的工作：
-
-| 工作 | 驗證內容 | 保存結果 |
-| --- | --- | --- |
-| `mariadb-integration` | 後端與指令的 Ruff、pytest、真實 MariaDB 遷移及 metadata 檢查 | JUnit XML、測試輸出、失敗時的資料庫／遷移服務日誌與狀態 |
-| `frontend-tests` | Streamlit／客戶端的 Ruff、格式檢查與 pytest，不依賴後端工作結果 | JUnit XML、測試輸出與失敗容器日誌 |
-| `clean-deployment` | 全新環境啟動、權限、WebSocket、入庫及重啟後保存 | 驗收輸出、失敗時經過濾的服務狀態與日誌摘要 |
-
-每次執行的 Actions 頁面下方 **Artifacts** 提供三份結果，設定保留 14 天。成功與失敗都會上傳；若建置、遷移或程式碼檢查在 pytest 前失敗，沒有 JUnit XML 屬預期情況，請先查看 `test.log`。pytest 成功後若無法匯出 JUnit XML，工作仍會失敗。診斷收集在清理前執行；不會上傳 `.env`。前後端各使用獨立 Compose project，互不阻擋。
-
-`DataPulse CI required` 是固定名稱的彙總檢查，只有上述三個工作全部成功才會通過；失敗、取消或跳過都不算成功。要在 GitHub 強制執行合併條件，需另於預設分支 `main` 的 **Settings → Branches → Branch protection rules** 設定：
-
-1. 啟用 **Require a pull request before merging**；單人維護可將必要核准數設為 0。
-2. 啟用 **Require status checks to pass before merging**，選擇 `DataPulse CI required`，並啟用 **Require branches to be up to date before merging**。
-3. 啟用 **Do not allow bypassing the above settings**，讓管理員也遵守條件；保留其他既有保護規則。
-
-Workflow 本身不會建立分支保護。私人儲存庫需要支援此功能的 GitHub 方案（個人帳號為 GitHub Pro）；若 GitHub 顯示需升級方案，上述強制規則尚未生效。官方說明見 [分支保護](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)與 [Actions 結果保存](https://docs.github.com/en/actions/tutorials/store-and-share-data)。
-
-2026-11-08 實際查詢本儲存庫：目前帳號具有 Admin 權限，但分支保護與規則集 API 均回覆 403，要求升級 GitHub Pro。因此強制合併規則尚未啟用。此輪本機驗證為後端與指令測試 414 項、前端 248 項全部通過；另通過完整啟動／重啟、實際失敗診斷保存、測試失敗時的 JUnit 匯出、成功時報告缺失阻擋，以及合併檢查的 64 種狀態組合。GitHub Actions 設定經 actionlint 檢查通過。
+專案提供 [GitHub Actions workflow](.github/workflows/ci.yml)，包含後端與 MariaDB 整合、前端測試、乾淨環境部署三個工作，並以 `DataPulse CI required` 彙總狀態。測試報告會保存在各次執行的 Artifacts；workflow 本身不會建立分支保護規則。
 
 ### 乾淨環境與完整啟動驗收
 
@@ -261,30 +266,6 @@ python3 scripts/clean_environment_smoke.py --project datapulse-clean-acceptance 
 腳本產生獨立憑證，驗證 MariaDB → Alembic → Bootstrap → FastAPI → Streamlit 的完整啟動鏈，以及三角色、CRUD、Swagger、WebSocket 與批次入庫。接著由第二位 Admin 將初始化管理員降為 Viewer，移除容器但保留該測試專案的 volume，再啟動整套服務，確認角色、資料及監測歷史均保留且繼續產生新事件。
 
 驗收結束時僅清除本次建立的 Compose 專案、volume 與 `.env`。腳本會拒絕既有 `.env`、已使用的專案名稱、已占用連接埠及開發預設埠 8010／8510。未指定 `--project` 時使用隨機名稱。GitHub Actions 的獨立 `clean-deployment` job 會執行同一套驗收，其他 job 另跑 MariaDB 整合與 Streamlit 測試。
-
-主要案例包含註冊、密碼驗證、過期／無效 JWT、登出撤銷、停用帳號、權限變更、Viewer 限制、擁有權與 Admin 操作，以及 UTC、Decimal、分頁、篩選與排序。
-
-第二階段另涵蓋批次筆數／時間觸發、重試與去重、佇列背壓、關閉排空、生成器生命週期、WebSocket 認證與廣播、分類篩選、撤銷連線及慢速客戶端隔離。
-
-第二階段驗證結果（2026-11-08）：**87 個測試全部通過**，包含完整生成、WebSocket 接收、批次寫入與 Admin 歷史查詢流程。Alembic `0002_realtime_samples` 在隔離資料庫升版、降版及 metadata 一致性檢查通過。另以執行中的 Compose 服務確認三筆即時事件已提交，並驗證正常停止會排空尚未入庫的事件、後端重啟後仍可查詢。
-
-第三階段新增 **76 個前端測試**：40 個客戶端測試、21 個 CRUD／表單測試、15 個 Session／監控／圖表測試。本機與 Docker 測試全數通過，且後端 87 項回歸測試仍通過，合計 **163 項**。真實服務驗收涵蓋登入、精確 Decimal CRUD、WebSocket 接收與登出撤銷；瀏覽器另驗證註冊、完整 CRUD、圖表自動更新及暫停時由另一個客戶端登出後自動清除畫面。1536 × 1024 桌面與 390 × 844 手機畫面已檢查，詳見 [介面驗收記錄](docs/design/frontend-design.md)。
-
-第四階段驗證結果（2026-11-08）：**後端 144 項、前端 103 項，合計 247 項全部通過**。包含真正 MariaDB 聚合、小數精度、UTC／半開時間範圍、讀取快照一致性、即時歷史權限、匯入整批驗證、上傳／筆數上限、Excel 內容與公式字串安全，以及篩選／角色改變後清除舊結果和下載。Ruff 與 Alembic metadata 檢查通過。
-
-第五階段驗證結果（2026-11-08）：**後端 200 項、前端 131 項，合計 331 項全部通過**。涵蓋 Admin 授權、同時互相降權、Token／WebSocket 撤銷、稽核交易回滾、日誌過濾／去重／保留／關閉排空、資料庫探測與歷史異常篩選。Alembic `0003` 升降版及 metadata 檢查通過；實際瀏覽器完成帳號管理、日誌、狀態與歷史分頁驗證，並修正每次變更須重新確認的表單狀態。桌面與手機介面、服務重啟後日誌保存皆已檢查，詳見 [Admin 操作文件](docs/admin.md#已完成驗證)。
-
-設備監控改版（2026-11-08）：**後端 237 項、前端 184 項，合計 421 項全部通過**。`0004_sample_devices` 升降版、舊資料保留與 metadata 檢查通過；3 台設備在無訂閱者或畫面暫停時持續生成、入庫。實際瀏覽器確認設備切換、進頁／重新登入載入既有歷史、離開／恢復接續資料、歷史分頁與異常篩選；桌面和手機畫面皆已檢查，console 無 error／warning。詳見 [設備監控驗證](docs/device-monitoring.md#已完成驗證2026-11-08)。
-
-WebSocket 獨立開關（2026-11-08）：**隔離 Docker 環境的後端與指令測試 335 項、前端接收器測試 27 項全部通過**，Ruff 與格式檢查通過。驗證管理員權限、嚴格布林輸入、既有連線關閉、新連線 503、重新連線、並行切換與啟動初始設定。新版已套用至本機後端；實際使用 `stop`／`status`／`start` 驗收，切換期間 122 次 REST 健康／登入狀態請求全為 200，後端容器與啟動時間保持相同，模擬生成與批次寫入持續，最後恢復 WebSocket 開啟。測試用獨立暫存資料庫已清除。
-
-台灣時間與資料管理改版（2026-11-08）：**後端 284 項、前端 232 項，合計 516 項全部通過**。新增台灣跨日查詢／分組／Excel、設備分類限制、CSV／JSON 整批拒絕、日期與時分秒下拉框、數字精度及登入路由測試。真實瀏覽器完成新增、編輯、設備／標題搜尋、非數字阻擋及錯誤 CSV 驗收，桌面與手機畫面均已檢查。原有 2 位使用者與 1 筆記錄保留，本次暫時帳號與資料已清除；詳見 [前端驗收](docs/frontend.md#台灣時間與資料管理驗收2026-11-08)。
-
-資料分析與歷史整合（2026-11-08）：**後端 353 項、前端 248 項，合計 601 項全部通過**。設備選單統一為 A／B／C，分析區分登入者新增／匯入資料與系統監控資料；統計、歷史分頁及 Excel 共用設備、時間、標題、異常與事件條件。真實瀏覽器完成監控帶設備跳轉、個人範圍、分頁與切換清除舊下載；桌面及手機正常，Console 無 error／warning。詳見 [本次驗收](docs/analytics.md#資料來源與歷史整合驗收2026-11-08)。
-
-交付收尾驗證（2026-11-08）：**後端與指令測試 397 項、前端 248 項，合計 645 項全部通過**。新增 Bootstrap 角色／停用狀態保存、Swagger 與實際錯誤回應契約，以及乾淨環境腳本的隔離保護測試。從提交 `db497be` clone 的全新副本已完成兩次完整 Compose 啟動；初始化管理員被合法降為 Viewer 後仍可重新啟動，帳號、CRUD 記錄與已保存事件不變，新 WebSocket 事件持續入庫。驗收結束已清除獨立容器、volume 與產生的憑證。CI 已配置相同驗收工作；本段記錄的是本機實際執行結果。
-
-第一階段已驗證：21 個 MariaDB 整合測試與 24 個時間邊界測試通過；Alembic 升版、降版及 metadata 一致性通過。另以 Streamlit AppTest 驗證首頁正常／不可用狀態、重新整理與 Swagger 連結，並實際重建資料庫及後端容器確認記錄與管理員帳號保留。
 
 ## 遷移與資料保存
 
@@ -314,4 +295,4 @@ docker compose exec backend alembic check
 | `frontend/clients`、`state` | REST／WebSocket 客戶端、Session 與有界圖表緩衝 |
 | `frontend/tests` | 客戶端、狀態生命週期與 Streamlit AppTest |
 
-詳見 [架構](docs/architecture.md)、[資料庫設計](docs/database.md)、[驗收步驟](docs/demo.md) 與 [WebSocket 協定](docs/websocket-protocol.md)。
+詳見 [架構](docs/architecture.md)、[資料庫設計](docs/database.md)、[功能操作展示](docs/demo.md) 與 [WebSocket 協定](docs/websocket-protocol.md)。

@@ -1,4 +1,18 @@
-# DataPulse 驗收流程
+# DataPulse 功能操作展示
+
+已完成使用者管理、資料管理、即時監控、資料分析與系統管理五個模組。以下說明啟動方式與各項功能操作；技術與題目要求對照見 [README](../README.md)。
+
+## 展示準備
+
+| 展示前準備 | 注意事項 |
+| --- | --- |
+| 角色帳號 | 準備 Admin、User、Viewer；註冊先建立 User，再由 Admin 調整其他帳號角色，不能修改自己的角色 |
+| 正常與錯誤匯入檔 | 使用 [示範資料](../sample_data/README.md)；同次登入會阻擋已成功匯入的相同內容 |
+| 時間範圍與 Excel | 範例日期為 2026-11-07／08；查詢日期留空或涵蓋該區間。系統歷史匯出先選設備與較短時間，避免超過 10,000 筆 |
+| 權限解說 | Admin 歷史管理入口有限制，但設備歷史、分析與匯出開放所有登入角色，不能宣稱所有歷史讀取都限 Admin |
+| Demo 影片 | [README](../README.md) 提供中文 Demo 影片；文字流程可依本頁操作。本機原始影片保留於 `artifacts/demo/`，不隨 Git 提供 |
+
+## 環境啟動
 
 請先依根目錄 README 建立環境設定並啟動 Compose。預設 Streamlit 位址為 `http://localhost:8510`，Swagger 為 `http://localhost:8010/docs`。若調整宿主機連接埠，請同步調整 `PUBLIC_API_URL`。
 
@@ -11,16 +25,6 @@ docker compose ps
 初始化腳本會在不存在時建立 `.env` 並產生隨機密碼，不會覆寫既有設定。Admin 帳號與密碼在該檔的 `BOOTSTRAP_ADMIN_EMAIL`、`BOOTSTRAP_ADMIN_PASSWORD`；不應提交或公開此檔。遷移服務成功執行 Alembic 與 seed 後，後端才啟動。
 
 Seed 僅建立尚不存在的初始化帳號；既有帳號的角色、停用狀態、密碼與 Token 版本不變。另一位 Admin 降權初始化帳號後，重跑完整 Compose 啟動鏈仍應成功，且該帳號維持降權後的權限。
-
-完整自動驗收請使用另一個乾淨 clone（沒有 `.env`），執行：
-
-```bash
-python3 scripts/clean_environment_smoke.py --project datapulse-clean-demo --backend-port 18010 --frontend-port 18510
-```
-
-此流程會建立並清除獨立測試專案，涵蓋首次啟動、三角色、CRUD、Swagger、WebSocket 入庫，以及初始化管理員降權後保留 volume 重建服務；不要在目前使用中的開發目錄執行。一般單元與整合測試指令見 README。
-
-2026-11-08 已從提交 `db497be` 的乾淨 clone 成功執行此流程，使用隔離專案與 18010／18510 埠。兩次完整啟動、降權保留、資料保存與新事件入庫全部通過；結束後測試容器、volume 及 `.env` 均已清除。另有 397 項後端／指令測試與 248 項前端測試通過。
 
 ## 啟動與認證
 
@@ -65,13 +69,13 @@ python3 scripts/clean_environment_smoke.py --project datapulse-clean-demo --back
 | Viewer 讀取／寫入資料 | 讀取成功、寫入 `403` |
 | 無時區的時間、空標題、空 PATCH、必填欄位指定 null | `422` |
 
-初始 Admin 由環境設定與 seed 命令建立。第五階段可由 Admin 在系統管理頁將已註冊的測試帳號改為 Viewer 或另一位 Admin，操作細節見 [Admin 驗收](admin.md#驗收順序)。
+初始 Admin 由環境設定與 seed 命令建立。可由 Admin 在系統管理頁將已註冊的測試帳號改為 Viewer 或另一位 Admin，操作細節見 [Admin 操作步驟](admin.md#驗收順序)。
 
 ## 登出與保存
 
 呼叫 `POST /api/v1/auth/logout` 後，該使用者所有既有 token 均失效。重新使用舊 token 呼叫 `/users/me` 應回傳 `401`；重新登入可取得新 token。
 
-建立資料後執行一般服務重啟，重新登入並確認資料仍在。保留 named volume；`docker compose down -v` 會刪除資料，不屬於保存驗收步驟。
+建立資料後執行一般服務重啟，重新登入並確認資料仍在。保留 named volume；`docker compose down -v` 會刪除資料，示範資料保存時不要使用此參數。
 
 ## 即時推送與歷史保存
 
@@ -83,7 +87,7 @@ uv run --project backend python scripts/realtime_demo.py --device-id device-001 
 
 依提示輸入任一角色的帳號與密碼。預期先顯示連線成功，再列出指定設備五筆不同 `event_id` 的事件，最後顯示已在 MariaDB 歷史中確認這五筆資料。CLI 不會列印登入密碼或 token。
 
-| 情境 | 驗收方式與結果 |
+| 情境 | 操作與功能行為 |
 | --- | --- |
 | 即時推送 | 開兩個 CLI，確認重疊期間收到相同事件 ID，並非每連線獨立生成 |
 | 一般使用者訂閱 | User／Viewer 也能接收事件並使用 `--verify-history` |
@@ -97,13 +101,13 @@ uv run --project backend python scripts/realtime_demo.py --device-id device-001 
 
 即時監測資料位於獨立的 `realtime_samples`；原本 `/api/v1/records` 的一般 CRUD 記錄不會被生成器寫入。監測歷史為不可變快照，不提供對外修改 API。
 
-## 故障與關閉驗證
+## 故障與關閉行為
 
-批次寫入的暫時連線失敗、重送去重、佇列滿載背壓、關閉排空，以及 WebSocket 慢客戶端隔離都有自動測試。手動示範可短暫停止本專案的 `db` 容器，觀察 ready 狀態與日誌，再啟動資料庫，確認 writer 恢復寫入。此期間新 WebSocket 驗證可能失敗，已連線的持續驗證也會關閉連線。
+批次寫入遇到暫時連線失敗會保留批次並重試，使用事件 ID 避免重複入庫；佇列滿載時暫停生成，慢速 WebSocket 客戶端則單獨斷線。資料庫不可用期間，新 WebSocket 認證可能失敗，既有連線也可能因持續認證失敗而關閉。
 
 正常停止先結束生成器，再限時保存待寫入批次。資料庫持續不可用而超出排空期限時，會報告未保存資料；不可把程序停止當作所有事件已成功提交的證明。記憶體佇列不提供突然斷電後的重播。
 
-## Streamlit 操作驗收
+## Streamlit 操作展示
 
 | 操作 | 預期結果 |
 | --- | --- |
@@ -121,14 +125,6 @@ uv run --project backend python scripts/realtime_demo.py --device-id device-001 
 | 登出／憑證失效 | 清除本 Session 資料並停止接收；受保護頁面要求重新登入 |
 | 瀏覽器重新載入 | Session 重建，需要重新登入，不從網址還原 token |
 
-可使用前端客戶端煙霧測試重現 REST CRUD、WebSocket 接收與登出撤銷：
+已提供 CSV／JSON 匯入、Excel 匯出與統計分析；操作順序見 [分析與資料交換](analytics.md#驗收流程)。可先匯入範例、查詢分類與時間趨勢、下載 Excel，再用錯誤檔確認整批不寫入。
 
-```bash
-uv run --project frontend python scripts/frontend_smoke.py
-```
-
-使用 User 或 Admin 測試帳號；指令結束時會刪除其建立的 QA 記錄並登出。詳細 Session、連線清理與錯誤行為見 [Streamlit 前端](frontend.md)。
-
-第四階段已提供 CSV／JSON 匯入、Excel 匯出與統計分析；完整驗收順序見 [分析與資料交換](analytics.md#驗收流程)。可先匯入範例、查詢分類與時間趨勢、下載 Excel，再用錯誤檔確認整批不寫入。
-
-第五階段的管理操作請使用第二個測試帳號，依 [Admin 驗收順序](admin.md#驗收順序) 驗證角色、停用／啟用、日誌、資料庫與異常歷史。角色或狀態變更會撤銷目標帳號的既有登入；目前登入的 Admin 不能修改自己的角色或啟用狀態。
+管理操作請使用第二個展示帳號，依 [Admin 操作步驟](admin.md#驗收順序) 展示角色、停用／啟用、日誌、資料庫與異常歷史。角色或狀態變更會撤銷目標帳號的既有登入；目前登入的 Admin 不能修改自己的角色或啟用狀態。

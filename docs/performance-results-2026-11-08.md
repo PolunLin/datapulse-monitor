@@ -1,5 +1,7 @@
 # 獨立環境壓力與可用性測試（2026-11-08）
 
+**附件說明：**本報告的表格、判定與限制隨 Git 交付，可直接用於評閱。各節列出的原始檔名是本機附件索引，檔案位於 `artifacts/performance/20261108-unlimited/`，未加入 Git；clone 儲存庫不會取得這些附件，因此本文不提供指向它們的下載連結。若另附原始結果，須連同檔案一起交付；重現測試請依 [效能與可用性測試流程](performance-testing.md) 操作。Docker 功能補驗的本機附件位置另列於文末。
+
 本次已移除測試環境的 WebSocket 應用連線數上限。全部設備訂閱的短階段測試中，100、200、400、450、500 條皆完成且沒有階段內斷線；550 條開始出現明顯流失。500 條目標的 300 秒延長觀察實際由 498 條降至 497 條，符合本次 99% 存活門檻，但不能宣稱「500 條長時間零斷線」。
 
 單設備訂閱的最高短測通過目標是 1,000 條，但延長後 500、750、1,000 條均大量斷線。重置後端後，250 與 350 條各維持 180 秒，全部在線、持續收到資料且無斷線。因此本輪單設備「持續通過」值為 350 條，不能以短測的 1,000 條作為正式容量。
@@ -23,7 +25,7 @@
 | 隔離方式 | 容量與可用性分別使用獨立 Compose project、憑證、連接埠、網路及資料 volume；共用實體 Docker 主機 |
 | 範圍 | 後端 API、WebSocket、批次持久化與故障恢復；未測完整 Streamlit 使用者容量 |
 
-環境及來源檔案雜湊見 [metadata.json](../artifacts/performance/20261108-unlimited/metadata.json)。可用性原始結果來自另一個獨立測試專案，再複製至本次結果目錄；不是對容量測試服務注入故障。
+環境及來源檔案雜湊見 `metadata.json`。可用性原始結果來自另一個獨立測試專案，再複製至本次結果目錄；不是對容量測試服務注入故障。
 
 ## 全部設備 WebSocket 訂閱
 
@@ -43,7 +45,7 @@
 
 較大階段的「目標」不代表曾同時維持該數量。階段開始前的升載期間也可能流失；累積握手成功次數不能當成同時在線數。負載工具在連續未通過階段後停止，未以耗盡主機資源作為成功條件。
 
-原始資料：[廣範圍階梯](../artifacts/performance/20261108-unlimited/websocket-capacity-broad.json)、[450–600 條細測](../artifacts/performance/20261108-unlimited/websocket-capacity-refined.json)。
+原始資料：廣範圍階梯（`websocket-capacity-broad.json`）、450–600 條細測（`websocket-capacity-refined.json`）。
 
 ## 500 條目標延長觀察
 
@@ -62,7 +64,7 @@
 
 500 是本輪全部設備訂閱的最高通過目標，適合描述為目前設定下的初步容量區域。它不是精確最大容量，也不是可直接採用的正式服務上限。300 秒仍不足以建立數小時或數天的穩定性保證。
 
-原始資料：[300 秒觀察](../artifacts/performance/20261108-unlimited/websocket-capacity-soak.json)。
+原始資料：300 秒觀察（`websocket-capacity-soak.json`）。
 
 ## 單設備訂閱容量
 
@@ -85,7 +87,7 @@
 
 本輪證明單設備 350 條可持續通過三分鐘；350–500 之間尚未細分，且前序過載後的恢復狀態可能影響較高負載輪次，不能宣稱 350 是精確硬上限。單設備與全部設備的長測結果也不能依平均每秒事件數線性換算。週期認證、DB 存取與過載後恢復路徑需要另行剖析。
 
-原始資料：[階梯短測](../artifacts/performance/20261108-unlimited/websocket-capacity-device-broad.json)、[250 條持續測試](../artifacts/performance/20261108-unlimited/websocket-capacity-device-250-soak.json)、[350 條持續測試](../artifacts/performance/20261108-unlimited/websocket-capacity-device-350-soak.json)、[500 條延長](../artifacts/performance/20261108-unlimited/websocket-capacity-device-500-soak.json)、[750 條延長](../artifacts/performance/20261108-unlimited/websocket-capacity-device-750-soak.json)、[1,000 條延長](../artifacts/performance/20261108-unlimited/websocket-capacity-device-1000-soak.json)。
+原始資料：階梯短測（`websocket-capacity-device-broad.json`）、250 條持續測試（`websocket-capacity-device-250-soak.json`）、350 條持續測試（`websocket-capacity-device-350-soak.json`）、500 條延長（`websocket-capacity-device-500-soak.json`）、750 條延長（`websocket-capacity-device-750-soak.json`）、1,000 條延長（`websocket-capacity-device-1000-soak.json`）。
 
 ## API 容量
 
@@ -104,7 +106,7 @@
 
 已證實此配置下每秒 200 次查詢可完成。250／300 RPS 階段的負載端排程延遲 p95 約 101／102ms，且工具會跳過遲到或超出併發保護的排程，因此不能把 200 RPS 解讀為已證明的伺服器硬上限。350／400 RPS 則同時出現大量逾時；若要精確測 API 極限，需以分離主機或多程序負載產生器再確認。
 
-原始資料：[廣範圍 API 階梯](../artifacts/performance/20261108-unlimited/http-capacity-broad.json)、[250–350 RPS 細測](../artifacts/performance/20261108-unlimited/http-capacity.json)。
+原始資料：廣範圍 API 階梯（`http-capacity-broad.json`）、250–350 RPS 細測（`http-capacity.json`）。
 
 ## 故障恢復
 
@@ -121,7 +123,7 @@
 
 DB 故障期間 live 成功只代表程序仍能回應；ready 與帶認證資料查詢觀察到故障。恢復後的 writer 快照回到 healthy，持續入庫且只有正常待提交的小批次：DB 恢復後快照 pending 6 筆，崩潰恢復後 pending 3 筆。程序內計數會隨重啟歸零，不能拿跨重啟 counter 差值當作遺失筆數。
 
-原始資料：[觀察器](../artifacts/performance/20261108-unlimited/availability.json)、[故障時間線](../artifacts/performance/20261108-unlimited/timeline.jsonl)、[管線快照](../artifacts/performance/20261108-unlimited/pipeline-snapshots.json)、[自動重啟證據](../artifacts/performance/20261108-unlimited/crash-evidence.json)。
+原始資料：觀察器（`availability.json`）、故障時間線（`timeline.jsonl`）、管線快照（`pipeline-snapshots.json`）、自動重啟證據（`crash-evidence.json`）。
 
 ## 資料完整性
 
@@ -132,7 +134,7 @@ DB 故障期間 live 成功只代表程序仍能回應；ready 與帶認證資�
 | 六筆未入庫事件時間 | 三筆產生於崩潰前約 1.107 秒，另三筆約 0.106 秒，兩批相隔約 1 秒 | 與尚在記憶體的兩次設備取樣一致；不可歸因為已提交資料遺失 |
 | 故障恢復判定 | 通過 | 恢復操作能力與資料零遺失是不同驗收條件 |
 
-原始資料：[已提交事件抽驗](../artifacts/performance/20261108-unlimited/committed-event-verification.json)、[pending 抽樣對帳](../artifacts/performance/20261108-unlimited/availability.json)。若產品要求收到的事件即不可遺失，需要持久化事件通道與確認／重播機制，再重跑崩潰測試。
+原始資料：已提交事件抽驗（`committed-event-verification.json`）、pending 抽樣對帳（`availability.json`）。若產品要求收到的事件即不可遺失，需要持久化事件通道與確認／重播機制，再重跑崩潰測試。
 
 ## 結果限制與後續判讀
 
@@ -148,11 +150,11 @@ DB 故障期間 live 成功只代表程序仍能回應；ready 與帶認證資�
 | 四種故障的短期演練 | 證明本次恢復路徑，不建立不中斷 HA 或月度 availability SLO |
 | 資料完整性為抽樣 | 不能宣稱全程所有事件零遺失；本次已明確發現 pending 遺失 |
 
-彙整資料：[summary.json](../artifacts/performance/20261108-unlimited/summary.json)；資源取樣：[resources.jsonl](../artifacts/performance/20261108-unlimited/resources.jsonl)。分享結果時僅提供公開報告，不分享生成憑證及私有環境檔。
+彙整資料：`summary.json`；資源取樣：`resources.jsonl`。分享結果時僅提供公開報告，不分享生成憑證及私有環境檔。
 
 ## 交付與清理
 
-`WS_MAX_CONNECTIONS=0` 的支援與隔離工具共 52 項相關測試通過，Ruff 與格式檢查通過。兩套專用測試環境、資料 volume、network 與產生的憑證已清理；測試 image 保留供重建使用。原開發環境三個容器的識別與啟動時間均保持不變，見 [開發環境核對](../artifacts/performance/20261108-unlimited/development-preservation.json)。實際無上限設定與資源限制見 [環境核對](../artifacts/performance/20261108-unlimited/environment-verification.json)。
+`WS_MAX_CONNECTIONS=0` 的支援與隔離工具共 52 項相關測試通過，Ruff 與格式檢查通過。兩套專用測試環境、資料 volume、network 與產生的憑證已清理；測試 image 保留供重建使用。原開發環境三個容器的識別與啟動時間均保持不變，見開發環境核對（`development-preservation.json`）。實際無上限設定與資源限制見環境核對（`environment-verification.json`）。
 
 彙整檔的 `highest_stable_by_profile` 包含短階段通過值；判讀持續負載請使用 `highest_sustained_target_by_profile` 並同時查看實際連線數、斷線與持續時間。此處的 sustained 最低只要求 180 秒，仍不是長期服務保證。
 
