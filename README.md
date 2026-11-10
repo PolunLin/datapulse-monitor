@@ -1,10 +1,5 @@
 # DataPulse — 即時資料分析與監控
 
-## 中文 Demo（7 分 20 秒）
-
-
-
-https://github.com/user-attachments/assets/b620905c-006f-46cd-8720-9f6b0f1ee852
 
 DataPulse 是即時資料分析與監控系統，使用 FastAPI、Streamlit 與 MariaDB 11.7.2。三台模擬設備各自每秒產生資料，透過 WebSocket 推送、SQLAlchemy ORM 批次保存，並提供資料管理、分析與 Admin 管理功能。
 
@@ -294,5 +289,12 @@ docker compose exec backend alembic check
 | `frontend/views`、`components` | 登入、CRUD、監控、分析、資料交換、Admin 管理及共用表單／圖表 |
 | `frontend/clients`、`state` | REST／WebSocket 客戶端、Session 與有界圖表緩衝 |
 | `frontend/tests` | 客戶端、狀態生命週期與 Streamlit AppTest |
+
+## 中文 Demo（7 分 20 秒）
+
+
+
+https://github.com/user-attachments/assets/b620905c-006f-46cd-8720-9f6b0f1ee852
+
 
 詳見 [架構](docs/architecture.md)、[資料庫設計](docs/database.md)、[功能操作展示](docs/demo.md) 與 [WebSocket 協定](docs/websocket-protocol.md)。
